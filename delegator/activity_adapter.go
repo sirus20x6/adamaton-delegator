@@ -3,8 +3,8 @@ package delegator
 import (
 	"context"
 
-	"github.com/sirus20x6/adamomaton-platform/temporal/activities"
-	"github.com/sirus20x6/adamomaton-delegator/delegator/budget"
+	"github.com/sirus20x6/adamaton-platform/temporal/activities"
+	"github.com/sirus20x6/adamaton-delegator/delegator/budget"
 )
 
 // ActivityAdapter wraps an Orchestrator so it satisfies the

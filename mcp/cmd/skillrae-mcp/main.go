@@ -35,7 +35,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/sirupsen/logrus"
 
-	"github.com/sirus20x6/adamomaton-delegator/delegator/skillsclient"
+	"github.com/sirus20x6/adamaton-delegator/delegator/skillsclient"
 )
 
 const (

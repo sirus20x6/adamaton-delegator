@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sirus20x6/adamomaton-delegator/delegator/budget"
-	"github.com/sirus20x6/adamomaton-delegator/delegator/skillsclient"
-	"github.com/sirus20x6/adamomaton-core/executor/cli"
+	"github.com/sirus20x6/adamaton-delegator/delegator/budget"
+	"github.com/sirus20x6/adamaton-delegator/delegator/skillsclient"
+	"github.com/sirus20x6/adamaton-core/executor/cli"
 )
 
 // fakeSkillsClient lets tests script Search results and watch every

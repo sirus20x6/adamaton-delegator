@@ -1,4 +1,4 @@
-module github.com/sirus20x6/adamomaton-delegator/mcp
+module github.com/sirus20x6/adamaton-delegator/mcp
 
 go 1.25.0
 
@@ -6,9 +6,9 @@ require (
 	github.com/modelcontextprotocol/go-sdk v1.6.0
 	github.com/sirupsen/logrus v1.9.4
 	github.com/spf13/viper v1.21.0
-	github.com/sirus20x6/adamomaton-delegator/delegator v0.0.0
-	github.com/sirus20x6/adamomaton-platform/temporal v0.0.0
-	github.com/sirus20x6/adamomaton-evolve/workflow-builder v0.0.0
+	github.com/sirus20x6/adamaton-delegator/delegator v0.0.0
+	github.com/sirus20x6/adamaton-platform/temporal v0.0.0
+	github.com/sirus20x6/adamaton-evolve/workflow-builder v0.0.0
 	go.temporal.io/sdk v1.43.0
 )
 
@@ -91,7 +91,7 @@ require (
 	github.com/subosito/gotenv v1.6.0 // indirect
 	github.com/testcontainers/testcontainers-go v0.42.0 // indirect
 	github.com/testcontainers/testcontainers-go/modules/postgres v0.42.0 // indirect
-	github.com/sirus20x6/adamomaton-core v0.0.0 // indirect
+	github.com/sirus20x6/adamaton-core v0.0.0 // indirect
 	github.com/tklauser/go-sysconf v0.3.16 // indirect
 	github.com/tklauser/numcpus v0.11.0 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
@@ -133,18 +133,18 @@ require (
 
 
 replace (
-	github.com/sirus20x6/adamomaton-core => ../../core
-	github.com/sirus20x6/adamomaton-knowledge/skills => ../../knowledge/skills
-	github.com/sirus20x6/adamomaton-knowledge/skills-rae => ../../knowledge/skills-rae
-	github.com/sirus20x6/adamomaton-knowledge/reindex => ../../knowledge/reindex
-	github.com/sirus20x6/adamomaton-knowledge/r2g => ../../knowledge/r2g
-	github.com/sirus20x6/adamomaton-deepresearch/nano-research => ../../deepresearch/nano-research
-	github.com/sirus20x6/adamomaton-delegator/delegator => ../../delegator/delegator
-	github.com/sirus20x6/adamomaton-delegator/mcp => ../../delegator/mcp
-	github.com/sirus20x6/adamomaton-evolve/evolve => ../../evolve/evolve
-	github.com/sirus20x6/adamomaton-evolve/workflow-builder => ../../evolve/workflow-builder
-	github.com/sirus20x6/adamomaton-platform/dashboard => ../../platform/dashboard
-	github.com/sirus20x6/adamomaton-platform/plugin-host => ../../platform/plugin-host
-	github.com/sirus20x6/adamomaton-platform/dispatch => ../../platform/dispatch
-	github.com/sirus20x6/adamomaton-platform/temporal => ../../platform/temporal
+	github.com/sirus20x6/adamaton-core => ../../core
+	github.com/sirus20x6/adamaton-knowledge/skills => ../../knowledge/skills
+	github.com/sirus20x6/adamaton-knowledge/skills-rae => ../../knowledge/skills-rae
+	github.com/sirus20x6/adamaton-knowledge/reindex => ../../knowledge/reindex
+	github.com/sirus20x6/adamaton-knowledge/r2g => ../../knowledge/r2g
+	github.com/sirus20x6/adamaton-deepresearch/nano-research => ../../deepresearch/nano-research
+	github.com/sirus20x6/adamaton-delegator/delegator => ../../delegator/delegator
+	github.com/sirus20x6/adamaton-delegator/mcp => ../../delegator/mcp
+	github.com/sirus20x6/adamaton-evolve/evolve => ../../evolve/evolve
+	github.com/sirus20x6/adamaton-evolve/workflow-builder => ../../evolve/workflow-builder
+	github.com/sirus20x6/adamaton-platform/dashboard => ../../platform/dashboard
+	github.com/sirus20x6/adamaton-platform/plugin-host => ../../platform/plugin-host
+	github.com/sirus20x6/adamaton-platform/dispatch => ../../platform/dispatch
+	github.com/sirus20x6/adamaton-platform/temporal => ../../platform/temporal
 )

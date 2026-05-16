@@ -6,8 +6,8 @@ import (
 
 	"github.com/sirupsen/logrus"
 
-	"github.com/sirus20x6/adamomaton-core/octen"
-	"github.com/sirus20x6/adamomaton-core/pgutil"
+	"github.com/sirus20x6/adamaton-core/octen"
+	"github.com/sirus20x6/adamaton-core/pgutil"
 )
 
 // TestSearchScopedDense_RoundTrip verifies the full Phase-3 pathway:

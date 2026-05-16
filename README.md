@@ -1,4 +1,4 @@
-# adamomaton-delegator
+# adamaton-delegator
 
 Multi-agent delegation orchestrator. Routes coding tasks across Codex, Gemini, and OpenCode via a budget-aware router, tracks quota, and exposes the whole thing as two MCP servers for Claude Code to consume.
 
@@ -48,4 +48,4 @@ The orchestrator tests use a testcontainer-postgres.
 
 ## Where this fits
 
-`platform.dashboard` imports `delegator` **in-process** (Go import, not HTTP) so the `/delegator` page can read live orchestrator state. The MCP servers are called by Claude Code over stdio, not by other Adamomaton components. Depends on `adamomaton-core` and `adamomaton-knowledge` (skills-rae client). See `docs/ARCHITECTURE.md` in the umbrella.
+`platform.dashboard` imports `delegator` **in-process** (Go import, not HTTP) so the `/delegator` page can read live orchestrator state. The MCP servers are called by Claude Code over stdio, not by other Adamaton components. Depends on `adamaton-core` and `adamaton-knowledge` (skills-rae client). See `docs/ARCHITECTURE.md` in the umbrella.

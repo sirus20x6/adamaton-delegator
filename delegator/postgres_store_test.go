@@ -11,8 +11,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/sirus20x6/adamomaton-delegator/delegator/budget"
-	"github.com/sirus20x6/adamomaton-core/pgutil"
+	"github.com/sirus20x6/adamaton-delegator/delegator/budget"
+	"github.com/sirus20x6/adamaton-core/pgutil"
 )
 
 func newTestPgStore(t *testing.T) *PgStore {

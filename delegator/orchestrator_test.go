@@ -9,8 +9,8 @@ import (
 
 	"github.com/sirupsen/logrus"
 
-	"github.com/sirus20x6/adamomaton-delegator/delegator/budget"
-	"github.com/sirus20x6/adamomaton-core/executor/cli"
+	"github.com/sirus20x6/adamaton-delegator/delegator/budget"
+	"github.com/sirus20x6/adamaton-core/executor/cli"
 )
 
 // fakeBudget is an in-test BudgetClient that records calls and returns
