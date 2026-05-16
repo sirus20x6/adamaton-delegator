@@ -9,7 +9,7 @@ import (
 
 	"github.com/sirupsen/logrus"
 
-	"github.com/sirus20x6/adamomaton-core/pgutil"
+	"github.com/sirus20x6/adamaton-core/pgutil"
 )
 
 func skipUnlessBash(t *testing.T) {

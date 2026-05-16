@@ -11,7 +11,7 @@ import (
 	"go.temporal.io/api/serviceerror"
 	"go.temporal.io/sdk/client"
 
-	"github.com/sirus20x6/adamomaton-delegator/delegator/budget"
+	"github.com/sirus20x6/adamaton-delegator/delegator/budget"
 )
 
 // Scheduler wraps Temporal's ScheduleClient for recurring delegations. It

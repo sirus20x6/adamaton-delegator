@@ -7,7 +7,7 @@ import (
 
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/viper"
-	"github.com/sirus20x6/adamomaton-delegator/delegator/budget"
+	"github.com/sirus20x6/adamaton-delegator/delegator/budget"
 )
 
 func main() {

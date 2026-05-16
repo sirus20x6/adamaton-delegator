@@ -8,7 +8,7 @@ package delegator
 import (
 	"time"
 
-	"github.com/sirus20x6/adamomaton-delegator/delegator/budget"
+	"github.com/sirus20x6/adamaton-delegator/delegator/budget"
 )
 
 // TaskStatus mirrors the TS delegator's lifecycle.

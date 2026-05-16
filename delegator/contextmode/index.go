@@ -25,8 +25,8 @@ import (
 	pgvectorpgx "github.com/pgvector/pgvector-go/pgx"
 	"github.com/sirupsen/logrus"
 
-	"github.com/sirus20x6/adamomaton-core/octen"
-	"github.com/sirus20x6/adamomaton-core/pgutil"
+	"github.com/sirus20x6/adamaton-core/octen"
+	"github.com/sirus20x6/adamaton-core/pgutil"
 )
 
 //go:embed migrations/*.sql

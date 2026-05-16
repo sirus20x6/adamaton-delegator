@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sirus20x6/adamomaton-core/octen"
+	"github.com/sirus20x6/adamaton-core/octen"
 )
 
 // fakeOcten stands in for the deepresearch sidecar's /v1/embeddings.

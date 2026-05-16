@@ -6,7 +6,7 @@ import (
 
 	"github.com/sirupsen/logrus"
 
-	"github.com/sirus20x6/adamomaton-core/pgutil"
+	"github.com/sirus20x6/adamaton-core/pgutil"
 )
 
 // TestService_Cascade_RerankerPreemptsCompress: when a BGE reranker

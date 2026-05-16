@@ -7,9 +7,9 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/sirupsen/logrus"
 
-	"github.com/sirus20x6/adamomaton-core/octen"
-	"github.com/sirus20x6/adamomaton-delegator/delegator"
-	"github.com/sirus20x6/adamomaton-delegator/delegator/contextmode"
+	"github.com/sirus20x6/adamaton-core/octen"
+	"github.com/sirus20x6/adamaton-delegator/delegator"
+	"github.com/sirus20x6/adamaton-delegator/delegator/contextmode"
 )
 
 // Context-mode tools. The model writes a script (or fetches a URL),

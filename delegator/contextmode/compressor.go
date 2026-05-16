@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/sirus20x6/adamomaton-delegator/delegator/budget"
-	"github.com/sirus20x6/adamomaton-delegator/delegator"
+	"github.com/sirus20x6/adamaton-delegator/delegator/budget"
+	"github.com/sirus20x6/adamaton-delegator/delegator"
 )
 
 // Compressor is the last-resort fallback when output exceeds the

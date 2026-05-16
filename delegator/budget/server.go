@@ -17,7 +17,7 @@ import (
 	"github.com/gorilla/mux"
 	"github.com/sirupsen/logrus"
 
-	"github.com/sirus20x6/adamomaton-core/metrics"
+	"github.com/sirus20x6/adamaton-core/metrics"
 )
 
 const maxBodySize = 64 * 1024 // 64KB
