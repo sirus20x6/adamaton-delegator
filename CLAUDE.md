@@ -1,5 +1,11 @@
 # Agent instructions — adamaton-delegator
 
+> **🚫 BLOCKING — never commit to `main` directly.** Adamaton's pre-commit hook hard-rejects commits to `main`/`master` from the canonical checkout. Always start with:
+> ```bash
+> cd /thearray/git/Adamaton && bin/adam claim 'delegator'/<task>
+> ```
+> This creates a worktree on a feature branch where you can work freely. If you accidentally edited main, run `bin/adam rescue` from the umbrella to recover. See [umbrella CLAUDE.md](../CLAUDE.md) for the full agent workflow.
+
 Multi-agent task router + MCP servers. Two Go modules: `delegator/` (orchestrator + budget-router) and `mcp/` (stdio MCP servers Claude Code launches).
 
 ## Before you edit
