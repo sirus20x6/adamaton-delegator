@@ -3,12 +3,13 @@ module github.com/sirus20x6/adamaton-delegator/mcp
 go 1.25.0
 
 require (
+	github.com/google/uuid v1.6.0
 	github.com/modelcontextprotocol/go-sdk v1.6.0
 	github.com/sirupsen/logrus v1.9.4
-	github.com/spf13/viper v1.21.0
+	github.com/sirus20x6/adamaton-core v0.0.0
 	github.com/sirus20x6/adamaton-delegator/delegator v0.0.0
 	github.com/sirus20x6/adamaton-platform/temporal v0.0.0
-	github.com/sirus20x6/adamaton-evolve/workflow-builder v0.0.0
+	github.com/spf13/viper v1.21.0
 	go.temporal.io/sdk v1.43.0
 )
 
@@ -41,7 +42,6 @@ require (
 	github.com/golang-migrate/migrate/v4 v4.19.1 // indirect
 	github.com/golang/mock v1.6.0 // indirect
 	github.com/google/jsonschema-go v0.4.3 // indirect
-	github.com/google/uuid v1.6.0 // indirect
 	github.com/gorilla/mux v1.8.1 // indirect
 	github.com/grpc-ecosystem/go-grpc-middleware/v2 v2.3.2 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.22.0 // indirect
@@ -91,7 +91,6 @@ require (
 	github.com/subosito/gotenv v1.6.0 // indirect
 	github.com/testcontainers/testcontainers-go v0.42.0 // indirect
 	github.com/testcontainers/testcontainers-go/modules/postgres v0.42.0 // indirect
-	github.com/sirus20x6/adamaton-core v0.0.0 // indirect
 	github.com/tklauser/go-sysconf v0.3.16 // indirect
 	github.com/tklauser/numcpus v0.11.0 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
@@ -131,20 +130,19 @@ require (
 	modernc.org/token v1.0.0 // indirect
 )
 
-
 replace (
 	github.com/sirus20x6/adamaton-core => ../../core
-	github.com/sirus20x6/adamaton-knowledge/skills => ../../knowledge/skills
-	github.com/sirus20x6/adamaton-knowledge/skills-rae => ../../knowledge/skills-rae
-	github.com/sirus20x6/adamaton-knowledge/reindex => ../../knowledge/reindex
-	github.com/sirus20x6/adamaton-knowledge/r2g => ../../knowledge/r2g
 	github.com/sirus20x6/adamaton-deepresearch/nano-research => ../../deepresearch/nano-research
 	github.com/sirus20x6/adamaton-delegator/delegator => ../../delegator/delegator
 	github.com/sirus20x6/adamaton-delegator/mcp => ../../delegator/mcp
 	github.com/sirus20x6/adamaton-evolve/evolve => ../../evolve/evolve
 	github.com/sirus20x6/adamaton-evolve/workflow-builder => ../../evolve/workflow-builder
+	github.com/sirus20x6/adamaton-knowledge/r2g => ../../knowledge/r2g
+	github.com/sirus20x6/adamaton-knowledge/reindex => ../../knowledge/reindex
+	github.com/sirus20x6/adamaton-knowledge/skills => ../../knowledge/skills
+	github.com/sirus20x6/adamaton-knowledge/skills-rae => ../../knowledge/skills-rae
 	github.com/sirus20x6/adamaton-platform/dashboard => ../../platform/dashboard
-	github.com/sirus20x6/adamaton-platform/plugin-host => ../../platform/plugin-host
 	github.com/sirus20x6/adamaton-platform/dispatch => ../../platform/dispatch
+	github.com/sirus20x6/adamaton-platform/plugin-host => ../../platform/plugin-host
 	github.com/sirus20x6/adamaton-platform/temporal => ../../platform/temporal
 )
