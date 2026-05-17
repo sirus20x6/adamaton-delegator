@@ -7,12 +7,11 @@ require (
 	github.com/jackc/pgx/v5 v5.9.2
 	github.com/pgvector/pgvector-go v0.3.0
 	github.com/sirupsen/logrus v1.9.4
+	github.com/sirus20x6/adamaton-core v0.0.0
+	github.com/sirus20x6/adamaton-platform/temporal v0.0.0
 	github.com/sony/gobreaker v1.0.0
 	github.com/spf13/viper v1.21.0
 	github.com/stretchr/testify v1.11.1
-	github.com/sirus20x6/adamaton-core v0.0.0
-	github.com/sirus20x6/adamaton-platform/temporal v0.0.0
-	github.com/sirus20x6/adamaton-evolve/workflow-builder v0.0.0
 	go.temporal.io/api v1.62.11
 	go.temporal.io/sdk v1.43.0
 	golang.org/x/net v0.53.0
@@ -125,20 +124,19 @@ require (
 	modernc.org/token v1.0.0 // indirect
 )
 
-
 replace (
 	github.com/sirus20x6/adamaton-core => ../../core
-	github.com/sirus20x6/adamaton-knowledge/skills => ../../knowledge/skills
-	github.com/sirus20x6/adamaton-knowledge/skills-rae => ../../knowledge/skills-rae
-	github.com/sirus20x6/adamaton-knowledge/reindex => ../../knowledge/reindex
-	github.com/sirus20x6/adamaton-knowledge/r2g => ../../knowledge/r2g
 	github.com/sirus20x6/adamaton-deepresearch/nano-research => ../../deepresearch/nano-research
 	github.com/sirus20x6/adamaton-delegator/delegator => ../../delegator/delegator
 	github.com/sirus20x6/adamaton-delegator/mcp => ../../delegator/mcp
 	github.com/sirus20x6/adamaton-evolve/evolve => ../../evolve/evolve
 	github.com/sirus20x6/adamaton-evolve/workflow-builder => ../../evolve/workflow-builder
+	github.com/sirus20x6/adamaton-knowledge/r2g => ../../knowledge/r2g
+	github.com/sirus20x6/adamaton-knowledge/reindex => ../../knowledge/reindex
+	github.com/sirus20x6/adamaton-knowledge/skills => ../../knowledge/skills
+	github.com/sirus20x6/adamaton-knowledge/skills-rae => ../../knowledge/skills-rae
 	github.com/sirus20x6/adamaton-platform/dashboard => ../../platform/dashboard
-	github.com/sirus20x6/adamaton-platform/plugin-host => ../../platform/plugin-host
 	github.com/sirus20x6/adamaton-platform/dispatch => ../../platform/dispatch
+	github.com/sirus20x6/adamaton-platform/plugin-host => ../../platform/plugin-host
 	github.com/sirus20x6/adamaton-platform/temporal => ../../platform/temporal
 )
