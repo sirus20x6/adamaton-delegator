@@ -129,6 +129,11 @@ func resolveCodexResetTime(b *codexRateLimitBucket) string {
 // GetCodexUsage scans the last `days` of codex JSONL session files and
 // returns aggregated usage + the freshest rate-limit bucket. Mirrors
 // getCodexUsage from the TS source.
+//
+// NOTE: As of the CCSAVER token-source switch, GetAllAgentUsage consumes only
+// this function's rate-limit fields and Model — token counts now come from the
+// CCSAVER interactions table (see CCSaver.GetTokenTotalsByAPIType). The
+// token-scanning here is retained for standalone callers and its tests.
 func GetCodexUsage(days int, cfg CodexConfig) (*CodexUsage, error) {
 	if days <= 0 {
 		days = 1

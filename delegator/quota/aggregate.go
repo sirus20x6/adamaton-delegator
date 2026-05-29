@@ -12,13 +12,20 @@ import (
 // AggregateConfig optionally overrides the per-agent configs used by the
 // fan-out. Defaults to zero-valued configs (which respect $HOME).
 type AggregateConfig struct {
-	Claude  ClaudeConfig
-	Codex   CodexConfig
-	Gemini  GeminiConfig
-	Logger  *logrus.Logger
+	Claude ClaudeConfig
+	Codex  CodexConfig
+	Gemini GeminiConfig
+	Logger *logrus.Logger
 	// SkipGeminiLiveQuota disables the live OAuth quota fetch — useful in
 	// tests or environments without network access.
 	SkipGeminiLiveQuota bool
+	// CCSaverPath overrides the CCSAVER DB path used for token totals (and
+	// is propagated to the claude/gemini rate-limit lookups). Empty falls
+	// back to DefaultCCSaverPath().
+	CCSaverPath string
+	// SkipCCSaver disables the token-totals query entirely — useful in tests
+	// where the DB doesn't exist and we only exercise the rate-limit paths.
+	SkipCCSaver bool
 }
 
 func (c AggregateConfig) logger() *logrus.Logger {
@@ -37,26 +44,63 @@ func (c AggregateConfig) logger() *logrus.Logger {
 	return logrus.StandardLogger()
 }
 
-// GetAllAgentUsage fans out to each per-agent reader concurrently and returns
-// a unified slice. Errors from individual readers are logged and that agent
-// is omitted, matching the TS Promise.all+catch pattern.
+// GetAllAgentUsage returns a unified per-agent usage slice. Token counts come
+// from the CCSAVER interactions table (summed per api_type over the window);
+// the workstation proxy records every agent's traffic and ccsaver-mirror
+// replicates a 7-day slice to the dashboard host, so this works the same in a
+// local dev shell and in the pi5 dashboard container. Rate-limit/utilization
+// data still comes from the per-agent readers (claude headers, codex headers,
+// gemini live OAuth quota), which run concurrently.
+//
+// Agent → api_type token mapping:
+//
+//	claude   -> anthropic
+//	codex    -> openai, openai-codex
+//	gemini   -> gemini, gemini-code-assist
+//	opencode -> vllm
 func GetAllAgentUsage(ctx context.Context, days int, cfg AggregateConfig) ([]AgentUsage, error) {
 	if days <= 0 {
 		days = 1
 	}
 	logger := cfg.logger()
 
+	// Propagate the CCSAVER path override to the rate-limit lookups so every
+	// reader points at the same DB.
+	if cfg.CCSaverPath != "" {
+		cfg.Claude.CCSaverPath = cfg.CCSaverPath
+		cfg.Gemini.CCSaverPath = cfg.CCSaverPath
+	}
+
+	// Token totals from CCSAVER — the authoritative source. On any failure we
+	// fall through with an empty map (zero tokens + a warning) rather than
+	// reviving the per-CLI session-file scan; a DB-only environment is the
+	// expected deployment.
+	tokenTotals := map[string]AgentTokenTotals{}
+	if !cfg.SkipCCSaver {
+		if cs, err := OpenCCSaver(CCSaverConfig{Path: cfg.CCSaverPath, Logger: logger}); err == nil {
+			tt, qerr := cs.GetTokenTotalsByAPIType(days)
+			cs.Close()
+			if qerr != nil {
+				logger.WithError(qerr).Warn("ccsaver: token totals query failed; agent tokens will be zero")
+			} else {
+				tokenTotals = tt
+			}
+		} else {
+			logger.WithError(err).Warn("ccsaver: db unreadable; agent tokens will be zero")
+		}
+	}
+
 	var (
 		wg          sync.WaitGroup
 		claudeRes   *ClaudeUsage
 		codexRes    *CodexUsage
-		geminiRes   *GeminiUsage
 		geminiQuota *GeminiQuotaInfo
 	)
 
-	wg.Add(4)
+	wg.Add(3)
 	go func() {
 		defer wg.Done()
+		// Token output ignored; consumed only for rate-limit headers.
 		r, err := GetClaudeUsage(days, cfg.Claude)
 		if err != nil {
 			logger.WithError(err).Error("claude usage error")
@@ -66,21 +110,13 @@ func GetAllAgentUsage(ctx context.Context, days int, cfg AggregateConfig) ([]Age
 	}()
 	go func() {
 		defer wg.Done()
+		// Token output ignored; consumed only for rate-limit headers.
 		r, err := GetCodexUsage(days, cfg.Codex)
 		if err != nil {
 			logger.WithError(err).Error("codex usage error")
 			return
 		}
 		codexRes = r
-	}()
-	go func() {
-		defer wg.Done()
-		r, err := GetGeminiUsage(days, cfg.Gemini)
-		if err != nil {
-			logger.WithError(err).Error("gemini usage error")
-			return
-		}
-		geminiRes = r
 	}()
 	go func() {
 		defer wg.Done()
@@ -98,105 +134,144 @@ func GetAllAgentUsage(ctx context.Context, days int, cfg AggregateConfig) ([]Age
 
 	var summaries []AgentUsage
 
+	// claude — emitted unconditionally so a DB-only host still shows tokens.
+	claudeTok := sumTokenTotals(tokenTotals, "anthropic")
+	claudeUsage := AgentUsage{
+		Agent:        "claude",
+		APIType:      "anthropic",
+		Sessions:     claudeTok.Calls,
+		InputTokens:  claudeTok.InputTokens,
+		OutputTokens: claudeTok.OutputTokens,
+		Model:        firstNonEmpty(claudeTok.LatestModel, "claude-opus-4.7"),
+	}
 	if claudeRes != nil {
-		summaries = append(summaries, AgentUsage{
-			Agent:         "claude",
-			APIType:       "anthropic",
-			Sessions:      claudeRes.Sessions,
-			InputTokens:   claudeRes.TotalInputTokens + claudeRes.TotalCacheCreationTokens + claudeRes.TotalCacheReadTokens,
-			OutputTokens:  claudeRes.TotalOutputTokens,
-			Model:         "claude-opus-4.7",
-			Utilization5h: claudeRes.Utilization5h,
-			Utilization7d: claudeRes.Utilization7d,
-			ResetTime5h:   claudeRes.ResetTime5h,
-			ResetTime7d:   claudeRes.ResetTime7d,
-		})
+		claudeUsage.Utilization5h = claudeRes.Utilization5h
+		claudeUsage.Utilization7d = claudeRes.Utilization7d
+		claudeUsage.ResetTime5h = claudeRes.ResetTime5h
+		claudeUsage.ResetTime7d = claudeRes.ResetTime7d
 	}
+	summaries = append(summaries, claudeUsage)
 
+	// codex — sums both openai + openai-codex; JSON label stays "openai".
+	codexTok := sumTokenTotals(tokenTotals, "openai", "openai-codex")
+	codexModel := codexTok.LatestModel
 	if codexRes != nil {
-		model := codexRes.Model
-		if model == "" {
-			model = "gpt-5.3-codex"
-		}
-		summaries = append(summaries, AgentUsage{
-			Agent:         "codex",
-			APIType:       "openai",
-			Sessions:      codexRes.Sessions,
-			InputTokens:   codexRes.TotalInputTokens,
-			OutputTokens:  codexRes.TotalOutputTokens,
-			Model:         model,
-			Utilization5h: codexRes.Utilization5h,
-			Utilization7d: codexRes.Utilization7d,
-			ResetTime5h:   codexRes.ResetTime5h,
-			ResetTime7d:   codexRes.ResetTime7d,
-		})
+		codexModel = firstNonEmpty(codexModel, codexRes.Model)
 	}
+	codexUsage := AgentUsage{
+		Agent:        "codex",
+		APIType:      "openai",
+		Sessions:     codexTok.Calls,
+		InputTokens:  codexTok.InputTokens,
+		OutputTokens: codexTok.OutputTokens,
+		Model:        firstNonEmpty(codexModel, "gpt-5.3-codex"),
+	}
+	if codexRes != nil {
+		codexUsage.Utilization5h = codexRes.Utilization5h
+		codexUsage.Utilization7d = codexRes.Utilization7d
+		codexUsage.ResetTime5h = codexRes.ResetTime5h
+		codexUsage.ResetTime7d = codexRes.ResetTime7d
+	}
+	summaries = append(summaries, codexUsage)
 
-	if geminiRes != nil {
-		var utilDaily *float64
-		var resetDaily string
-
-		switch {
-		case geminiQuota != nil:
-			u := 1 - geminiQuota.LowestRemaining
-			utilDaily = &u
-			resetDaily = geminiQuota.ResetTime
-			// Persist live quota into the cache for next time.
-			if home, err := cfg.Gemini.homeDir(); err == nil {
-				_ = saveRateLimitCache(home, rateLimitCache{
-					Gemini: &struct {
-						UtilizationDaily *float64                            `json:"utilizationDaily,omitempty"`
-						ResetTimeDaily   string                              `json:"resetTimeDaily,omitempty"`
-						Models           map[string]GeminiRateLimitModelInfo `json:"models,omitempty"`
-						UpdatedAt        int64                               `json:"updatedAt"`
-					}{
-						UtilizationDaily: utilDaily,
-						ResetTimeDaily:   resetDaily,
-						UpdatedAt:        nowUnixMilli(),
-					},
-				})
+	// gemini — tokens from ccsaver; daily utilization from the live OAuth
+	// quota (or the on-disk cache), preserving the existing behavior.
+	geminiTok := sumTokenTotals(tokenTotals, "gemini", "gemini-code-assist")
+	var utilDaily *float64
+	var resetDaily string
+	switch {
+	case geminiQuota != nil:
+		u := 1 - geminiQuota.LowestRemaining
+		utilDaily = &u
+		resetDaily = geminiQuota.ResetTime
+		// Persist live quota into the cache for next time.
+		if home, err := cfg.Gemini.homeDir(); err == nil {
+			_ = saveRateLimitCache(home, rateLimitCache{
+				Gemini: &struct {
+					UtilizationDaily *float64                            `json:"utilizationDaily,omitempty"`
+					ResetTimeDaily   string                              `json:"resetTimeDaily,omitempty"`
+					Models           map[string]GeminiRateLimitModelInfo `json:"models,omitempty"`
+					UpdatedAt        int64                               `json:"updatedAt"`
+				}{
+					UtilizationDaily: utilDaily,
+					ResetTimeDaily:   resetDaily,
+					UpdatedAt:        nowUnixMilli(),
+				},
+			})
+		}
+	default:
+		if home, err := cfg.Gemini.homeDir(); err == nil {
+			if cached := getCachedGeminiRateLimits(home); cached != nil {
+				utilDaily = cached.UtilizationDaily
+				resetDaily = cached.ResetTimeDaily
 			}
-		default:
-			if home, err := cfg.Gemini.homeDir(); err == nil {
-				if cached := getCachedGeminiRateLimits(home); cached != nil {
-					utilDaily = cached.UtilizationDaily
-					resetDaily = cached.ResetTimeDaily
-				}
-			}
 		}
-
-		// Sort models for stable output — modelSet iteration order is random.
-		sort.Strings(geminiRes.Models)
-		modelStr := joinModels(geminiRes.Models)
-		if modelStr == "" {
-			modelStr = "gemini-3-flash-preview"
-		}
-
-		summaries = append(summaries, AgentUsage{
-			Agent:         "gemini",
-			APIType:       "gemini",
-			Sessions:      geminiRes.Sessions,
-			InputTokens:   geminiRes.TotalInputTokens + geminiRes.TotalCachedTokens,
-			OutputTokens:  geminiRes.TotalOutputTokens,
-			Model:         modelStr,
-			Utilization5h: utilDaily,
-			ResetTime5h:   resetDaily,
-		})
 	}
+	summaries = append(summaries, AgentUsage{
+		Agent:         "gemini",
+		APIType:       "gemini",
+		Sessions:      geminiTok.Calls,
+		InputTokens:   geminiTok.InputTokens,
+		OutputTokens:  geminiTok.OutputTokens,
+		Model:         firstNonEmpty(joinModels(geminiTok.Models), "gemini-3-flash-preview"),
+		Utilization5h: utilDaily,
+		ResetTime5h:   resetDaily,
+	})
 
-	// OpenCode is always present.
-	if oc, err := GetOpenCodeUsage(days); err == nil && oc != nil {
-		summaries = append(summaries, AgentUsage{
-			Agent:        "opencode",
-			APIType:      "local",
-			Sessions:     oc.Sessions,
-			InputTokens:  oc.InputTokens,
-			OutputTokens: oc.OutputTokens,
-			Model:        oc.Model,
-		})
-	}
+	// opencode — runs on the local vLLM backend, captured as api_type "vllm".
+	opencodeTok := sumTokenTotals(tokenTotals, "vllm")
+	summaries = append(summaries, AgentUsage{
+		Agent:        "opencode",
+		APIType:      "local",
+		Sessions:     opencodeTok.Calls,
+		InputTokens:  opencodeTok.InputTokens,
+		OutputTokens: opencodeTok.OutputTokens,
+		Model:        firstNonEmpty(opencodeTok.LatestModel, "local"),
+	})
 
 	return summaries, nil
+}
+
+// sumTokenTotals merges the per-api_type rollups for the given api_types into
+// one AgentTokenTotals: summed tokens/calls, a deduped+sorted model union, and
+// the LatestModel from whichever contributing api_type logged the most calls.
+func sumTokenTotals(byType map[string]AgentTokenTotals, apiTypes ...string) AgentTokenTotals {
+	var out AgentTokenTotals
+	modelSet := make(map[string]struct{})
+	var bestCalls int64 = -1
+	for _, at := range apiTypes {
+		t, ok := byType[at]
+		if !ok {
+			continue
+		}
+		out.InputTokens += t.InputTokens
+		out.OutputTokens += t.OutputTokens
+		out.Calls += t.Calls
+		for _, m := range t.Models {
+			if m != "" {
+				modelSet[m] = struct{}{}
+			}
+		}
+		if t.LatestModel != "" && t.Calls > bestCalls {
+			bestCalls = t.Calls
+			out.LatestModel = t.LatestModel
+		}
+	}
+	for m := range modelSet {
+		out.Models = append(out.Models, m)
+	}
+	sort.Strings(out.Models)
+	return out
+}
+
+// firstNonEmpty returns the first non-empty string argument, or "".
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // joinModels concatenates models with ", " separator (matches TS .join).
