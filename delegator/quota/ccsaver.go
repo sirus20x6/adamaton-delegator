@@ -526,6 +526,121 @@ func (c *CCSaver) GetGeminiUsage(days int) *GeminiCCSaverTotals {
 	return totals
 }
 
+// GetTokenTotalsByAPIType rolls up input/output tokens, call counts, and
+// models per api_type over the last `days` window. This is the single source
+// of agent token usage for GetAllAgentUsage — the per-agent CLI session-file
+// scanners no longer feed token counts. Returns one entry per api_type that
+// has at least one row in the window; api_types with no rows are simply
+// absent from the map.
+func (c *CCSaver) GetTokenTotalsByAPIType(days int) (map[string]AgentTokenTotals, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	if days <= 0 {
+		days = 1
+	}
+	// Compare the BARE timestamp column against a Go-computed cutoff so the
+	// idx_timestamp index is usable. Wrapping the column in datetime(...) — as
+	// the older GetGeminiUsage/GetUsageStats queries do — forces a full scan,
+	// which is ~70s on the multi-GB workstation DB. The cutoff is formatted in
+	// local time to match the proxy's stored RFC3339 timestamps (numeric
+	// offset), so the lexicographic range scan lines up with the wall clock.
+	cutoff := time.Now().AddDate(0, 0, -days).Format(time.RFC3339)
+	out := make(map[string]AgentTokenTotals)
+
+	// Pass 1: per-api_type sums, call count, and the id of the most recent
+	// row (resolved to a model below).
+	maxID := make(map[string]int64)
+	// INDEXED BY idx_timestamp forces the timestamp range scan; without it the
+	// planner picks idx_api_type for the GROUP BY and walks every api_type's
+	// full history (~33s on the workstation DB vs ~0.07s with the hint). Both
+	// the live DB and the ccsaver-mirror snapshot define idx_timestamp.
+	aggRows, err := c.db.Query(
+		`SELECT api_type,
+		        COALESCE(SUM(input_tokens), 0)  AS in_tokens,
+		        COALESCE(SUM(output_tokens), 0) AS out_tokens,
+		        COUNT(*)                        AS calls,
+		        MAX(id)                         AS max_id
+		 FROM interactions INDEXED BY idx_timestamp
+		 WHERE timestamp >= ? AND api_type IS NOT NULL
+		 GROUP BY api_type`,
+		cutoff,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query token totals: %w", err)
+	}
+	defer aggRows.Close()
+	for aggRows.Next() {
+		var apiType sql.NullString
+		var maxIDNull sql.NullInt64
+		var t AgentTokenTotals
+		if err := aggRows.Scan(&apiType, &t.InputTokens, &t.OutputTokens, &t.Calls, &maxIDNull); err != nil {
+			return nil, fmt.Errorf("scan token totals: %w", err)
+		}
+		if !apiType.Valid || apiType.String == "" {
+			continue
+		}
+		out[apiType.String] = t
+		if maxIDNull.Valid {
+			maxID[apiType.String] = maxIDNull.Int64
+		}
+	}
+	if err := aggRows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate token totals: %w", err)
+	}
+
+	// Resolve the latest model per api_type from the MAX(id) rows in one
+	// id-indexed lookup (≤ one row per api_type).
+	for at, id := range maxID {
+		var model sql.NullString
+		err := c.db.QueryRow(`SELECT model FROM interactions WHERE id = ?`, id).Scan(&model)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				continue
+			}
+			return nil, fmt.Errorf("query latest model: %w", err)
+		}
+		if model.Valid && model.String != "" {
+			t := out[at]
+			t.LatestModel = model.String
+			out[at] = t
+		}
+	}
+
+	// Pass 2: distinct models per api_type. Pre-sorted by the query so the
+	// appended Models slices are stable.
+	modRows, err := c.db.Query(
+		`SELECT DISTINCT api_type, model FROM interactions INDEXED BY idx_timestamp
+		 WHERE timestamp >= ?
+		   AND api_type IS NOT NULL AND model IS NOT NULL AND model <> ''
+		 ORDER BY api_type, model`,
+		cutoff,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query token models: %w", err)
+	}
+	defer modRows.Close()
+	for modRows.Next() {
+		var apiType, model sql.NullString
+		if err := modRows.Scan(&apiType, &model); err != nil {
+			return nil, fmt.Errorf("scan token models: %w", err)
+		}
+		if !apiType.Valid || apiType.String == "" {
+			continue
+		}
+		// Only attach models to api_types that produced a totals row.
+		if t, ok := out[apiType.String]; ok {
+			t.Models = append(t.Models, model.String)
+			out[apiType.String] = t
+		}
+	}
+	if err := modRows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate token models: %w", err)
+	}
+
+	return out, nil
+}
+
 // epochSecsToISO converts a Unix-epoch-seconds string to an ISO-8601 UTC
 // timestamp, returning "" if the input cannot be parsed. The TS source
 // `new Date(parseInt(reset) * 1000).toISOString()` is permissive — any
