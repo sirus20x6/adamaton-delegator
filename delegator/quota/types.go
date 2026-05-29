@@ -14,7 +14,7 @@ type QuotaInfo struct {
 	Agent              string   `json:"agent"`
 	APIType            string   `json:"apiType"`
 	Utilization5h      *float64 `json:"utilization5h,omitempty"`
-	Utilization7d     *float64 `json:"utilization7d,omitempty"`
+	Utilization7d      *float64 `json:"utilization7d,omitempty"`
 	ResetTime5h        string   `json:"resetTime5h,omitempty"`
 	ResetTime7d        string   `json:"resetTime7d,omitempty"`
 	Status5h           string   `json:"status5h,omitempty"`
@@ -51,17 +51,17 @@ type AgentUsage struct {
 
 // ClaudeUsage matches the TS ClaudeUsage interface from agent-usage.ts.
 type ClaudeUsage struct {
-	Sessions                  int64    `json:"sessions"`
-	TotalInputTokens          int64    `json:"totalInputTokens"`
-	TotalOutputTokens         int64    `json:"totalOutputTokens"`
-	TotalCacheCreationTokens  int64    `json:"totalCacheCreationTokens"`
-	TotalCacheReadTokens      int64    `json:"totalCacheReadTokens"`
-	MessageCount              int64    `json:"messageCount"`
-	ToolCallCount             int64    `json:"toolCallCount"`
-	Utilization5h             *float64 `json:"utilization5h,omitempty"`
-	Utilization7d             *float64 `json:"utilization7d,omitempty"`
-	ResetTime5h               string   `json:"resetTime5h,omitempty"`
-	ResetTime7d               string   `json:"resetTime7d,omitempty"`
+	Sessions                 int64    `json:"sessions"`
+	TotalInputTokens         int64    `json:"totalInputTokens"`
+	TotalOutputTokens        int64    `json:"totalOutputTokens"`
+	TotalCacheCreationTokens int64    `json:"totalCacheCreationTokens"`
+	TotalCacheReadTokens     int64    `json:"totalCacheReadTokens"`
+	MessageCount             int64    `json:"messageCount"`
+	ToolCallCount            int64    `json:"toolCallCount"`
+	Utilization5h            *float64 `json:"utilization5h,omitempty"`
+	Utilization7d            *float64 `json:"utilization7d,omitempty"`
+	ResetTime5h              string   `json:"resetTime5h,omitempty"`
+	ResetTime7d              string   `json:"resetTime7d,omitempty"`
 }
 
 // CodexUsage matches the TS CodexUsage interface.
@@ -79,20 +79,12 @@ type CodexUsage struct {
 
 // GeminiUsage matches the TS GeminiUsage interface.
 type GeminiUsage struct {
-	Sessions            int64    `json:"sessions"`
-	TotalInputTokens    int64    `json:"totalInputTokens"`
-	TotalOutputTokens   int64    `json:"totalOutputTokens"`
-	TotalThoughtTokens  int64    `json:"totalThoughtTokens"`
-	TotalCachedTokens   int64    `json:"totalCachedTokens"`
-	Models              []string `json:"models"`
-}
-
-// OpenCodeUsage is a stub — opencode is local + unlimited.
-type OpenCodeUsage struct {
-	Sessions     int64  `json:"sessions"`
-	InputTokens  int64  `json:"inputTokens"`
-	OutputTokens int64  `json:"outputTokens"`
-	Model        string `json:"model"`
+	Sessions           int64    `json:"sessions"`
+	TotalInputTokens   int64    `json:"totalInputTokens"`
+	TotalOutputTokens  int64    `json:"totalOutputTokens"`
+	TotalThoughtTokens int64    `json:"totalThoughtTokens"`
+	TotalCachedTokens  int64    `json:"totalCachedTokens"`
+	Models             []string `json:"models"`
 }
 
 // GeminiQuotaInfo is the live-quota result from the Cloud Code OAuth API.
@@ -104,9 +96,9 @@ type GeminiQuotaInfo struct {
 
 // GeminiQuotaModel is one row inside GeminiQuotaInfo.Models.
 type GeminiQuotaModel struct {
-	ModelID            string  `json:"modelId"`
-	RemainingFraction  float64 `json:"remainingFraction"`
-	ResetTime          string  `json:"resetTime,omitempty"`
+	ModelID           string  `json:"modelId"`
+	RemainingFraction float64 `json:"remainingFraction"`
+	ResetTime         string  `json:"resetTime,omitempty"`
 }
 
 // GeminiRateLimitsReport is the input to ReportGeminiRateLimits — manual
@@ -141,6 +133,19 @@ type GeminiCCSaverTotals struct {
 	Output int64
 	Calls  int64
 	Models []string
+}
+
+// AgentTokenTotals is the per-api_type token rollup returned by
+// CCSaver.GetTokenTotalsByAPIType. Tokens for every agent are now sourced
+// from the CCSAVER interactions table (which the workstation proxy writes and
+// ccsaver-mirror replicates to the dashboard host) rather than from per-agent
+// CLI session-file scanning.
+type AgentTokenTotals struct {
+	InputTokens  int64
+	OutputTokens int64
+	Calls        int64
+	Models       []string // distinct non-empty model names, sorted
+	LatestModel  string   // model of the highest-id row in the window, or ""
 }
 
 // CostBreakdownRow is one bucket from GetCostBreakdown — mirrors the TS

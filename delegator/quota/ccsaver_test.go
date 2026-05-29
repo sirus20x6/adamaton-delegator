@@ -31,7 +31,9 @@ CREATE TABLE interactions (
   duration_ms INTEGER DEFAULT 0,
   response_headers TEXT,
   timestamp TEXT
-);`
+);
+CREATE INDEX idx_timestamp ON interactions(timestamp);
+CREATE INDEX idx_api_type ON interactions(api_type);`
 	if _, err := db.Exec(schema); err != nil {
 		t.Fatalf("schema: %v", err)
 	}
@@ -336,6 +338,62 @@ func TestCCSaver_GetAllQuotas_IncludesOpenCode(t *testing.T) {
 	}
 	if !apiTypes["anthropic"] || !apiTypes["openai"] {
 		t.Errorf("missing api types: got %v", apiTypes)
+	}
+}
+
+func TestCCSaver_GetTokenTotalsByAPIType(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ccs.db")
+	now := time.Now().UTC().Format(time.RFC3339)
+	buildCCSaverDB(t, path, []ccsRow{
+		{APIType: "anthropic", Model: "claude-opus", InputTokens: 100, OutputTokens: 40, Timestamp: now},
+		{APIType: "anthropic", Model: "claude-haiku", InputTokens: 10, OutputTokens: 5, Timestamp: now},
+		{APIType: "openai", Model: "gpt-5", InputTokens: 30, OutputTokens: 7, Timestamp: now},
+		{APIType: "openai-codex", Model: "gpt-5-codex", InputTokens: 70, OutputTokens: 13, Timestamp: now},
+		{APIType: "gemini-code-assist", Model: "gemini-2.5-flash", InputTokens: 500, OutputTokens: 200, Timestamp: now},
+		{APIType: "vllm", Model: "qwen-coder", InputTokens: 800, OutputTokens: 300, Timestamp: now},
+	})
+
+	cs, err := OpenCCSaver(CCSaverConfig{Path: path})
+	if err != nil {
+		t.Fatalf("OpenCCSaver: %v", err)
+	}
+	defer cs.Close()
+
+	totals, err := cs.GetTokenTotalsByAPIType(7)
+	if err != nil {
+		t.Fatalf("GetTokenTotalsByAPIType: %v", err)
+	}
+
+	// Per-api_type sums.
+	if got := totals["anthropic"]; got.InputTokens != 110 || got.OutputTokens != 45 || got.Calls != 2 {
+		t.Errorf("anthropic = %+v, want in=110 out=45 calls=2", got)
+	}
+	if got := totals["openai-codex"]; got.InputTokens != 70 || got.OutputTokens != 13 {
+		t.Errorf("openai-codex = %+v, want in=70 out=13", got)
+	}
+	if got := totals["vllm"]; got.InputTokens != 800 || got.OutputTokens != 300 || got.LatestModel != "qwen-coder" {
+		t.Errorf("vllm = %+v, want in=800 out=300 model=qwen-coder", got)
+	}
+
+	// anthropic has two distinct models.
+	if got := totals["anthropic"].Models; len(got) != 2 {
+		t.Errorf("anthropic models = %v, want 2", got)
+	}
+
+	// The codex agent merges openai + openai-codex (this is the mapping
+	// GetAllAgentUsage relies on).
+	codex := sumTokenTotals(totals, "openai", "openai-codex")
+	if codex.InputTokens != 100 || codex.OutputTokens != 20 || codex.Calls != 2 {
+		t.Errorf("codex merge = %+v, want in=100 out=20 calls=2", codex)
+	}
+	if len(codex.Models) != 2 {
+		t.Errorf("codex merged models = %v, want 2 (gpt-5, gpt-5-codex)", codex.Models)
+	}
+
+	// An api_type with no rows is absent from the map → zero merge.
+	empty := sumTokenTotals(totals, "openrouter")
+	if empty.InputTokens != 0 || empty.Calls != 0 || empty.LatestModel != "" {
+		t.Errorf("empty merge = %+v, want zero", empty)
 	}
 }
 

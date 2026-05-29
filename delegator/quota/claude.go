@@ -119,6 +119,11 @@ func listClaudeSessionFiles(homeDir string, days int) ([]string, error) {
 
 // GetClaudeUsage scans Claude's session JSONL files plus stats-cache.json,
 // then augments with rate-limit data from CCSAVER. Mirrors getClaudeUsage.
+//
+// NOTE: As of the CCSAVER token-source switch, GetAllAgentUsage consumes only
+// this function's rate-limit/utilization fields — token counts now come from
+// the CCSAVER interactions table (see CCSaver.GetTokenTotalsByAPIType). The
+// token-scanning here is retained for standalone callers and its tests.
 func GetClaudeUsage(days int, cfg ClaudeConfig) (*ClaudeUsage, error) {
 	if days <= 0 {
 		days = 1
