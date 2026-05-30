@@ -77,6 +77,20 @@ type RouteRequest struct {
 	PreferProvider  Provider       `json:"prefer_provider,omitempty"`
 	// Priority shifts the cost/headroom weighting. Empty defaults to PriorityNormal.
 	Priority Priority `json:"priority,omitempty"`
+	// ProviderLoad is the current number of in-flight tasks already routed to
+	// each provider but not yet reported as complete. It's optional, supplied by
+	// the orchestrator (which knows how many delegations are outstanding). The
+	// router uses it two ways: a provider at or above its MaxConcurrency cap is
+	// hard-filtered (it can't take more work right now), and a load-proportional
+	// penalty nudges the score toward less-saturated providers so background
+	// tasks don't pile onto the single cheapest provider while it's busy. A nil
+	// or empty map means "no load info" and preserves the pre-load behavior.
+	ProviderLoad map[Provider]int `json:"provider_load,omitempty"`
+	// QueueDepth is the number of tasks already waiting to be routed (the
+	// backlog). When the backlog is deep the router leans harder on the load
+	// penalty so it spreads work across providers instead of stacking it all on
+	// the top-scored one. Zero (the default) preserves the pre-load behavior.
+	QueueDepth int `json:"queue_depth,omitempty"`
 }
 
 // RouteResponse contains the router's recommendation.
@@ -212,6 +226,12 @@ type ProviderConfig struct {
 	// Unlimited explicitly marks a provider as having no budget cap. When true,
 	// DailyLimit / WeeklyLimit are ignored by router and tracker logic.
 	Unlimited bool `mapstructure:"unlimited"`
+	// MaxConcurrency caps how many in-flight tasks may be routed to this provider
+	// at once. 0 (the default) means no concurrency cap — useful for unlimited
+	// local backends and for preserving the pre-load behavior when the caller
+	// doesn't set it. When >0 and the caller passes ProviderLoad, the router
+	// hard-filters a provider whose in-flight count has reached the cap.
+	MaxConcurrency int `mapstructure:"max_concurrency"`
 }
 
 // Validate checks a provider config for sane values.
@@ -236,6 +256,9 @@ func (pc *ProviderConfig) Validate() error {
 	}
 	if pc.WeeklyLimit < 0 {
 		return fmt.Errorf("weekly_limit must be >= 0, got %d", pc.WeeklyLimit)
+	}
+	if pc.MaxConcurrency < 0 {
+		return fmt.Errorf("max_concurrency must be >= 0, got %d", pc.MaxConcurrency)
 	}
 	return nil
 }
