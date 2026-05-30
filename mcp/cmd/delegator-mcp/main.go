@@ -237,6 +237,21 @@ func run() error {
 	defer tasksStore.Close()
 	orch.Store = tasksStore
 
+	// Kanban stale-claim sweep. Reuses the tasks-store pool (same evo-schema
+	// DSN) to periodically flip crashed-worker card claims back to unclaimed
+	// — the crash-recovery mechanism for the kanban orchestration model
+	// (docs/PROJECTS_KANBAN.md decision 3). Best-effort; tied to the server
+	// lifetime via sweepCtx so it stops cleanly on shutdown. Set
+	// KANBAN_STALE_SWEEP=off to disable.
+	sweepCtx, sweepCancel := context.WithCancel(context.Background())
+	defer sweepCancel()
+	if os.Getenv("KANBAN_STALE_SWEEP") != "off" {
+		delegator.StartKanbanSweeper(sweepCtx, tasksStore.Pool(),
+			delegator.DefaultStaleClaimTTL, delegator.DefaultStaleClaimSweepInterval, logger)
+	} else {
+		logger.Info("KANBAN_STALE_SWEEP=off; kanban stale-claim sweep disabled")
+	}
+
 	// Lazy Temporal gate — dials + spins up the worker on first schedule
 	// tool call, not at startup. This means starting Temporal AFTER
 	// delegator-mcp doesn't require a Claude Code restart; the next
@@ -598,6 +613,11 @@ func registerTools(server *mcp.Server, orch *delegator.Orchestrator, gate *tempo
 	// bytes back. Opencode/qwen is a last-resort compressor when
 	// search returns nothing useful.
 	registerContextTools(server, orch, dsn, logger)
+
+	// Kanban tools: thin REST clients of the apiserver kanban API
+	// (board/column/card store shared with the dashboard). Base URL
+	// from KANBAN_API_URL (default http://localhost:9123).
+	registerKanbanTools(server, logger)
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "list_tasks",
