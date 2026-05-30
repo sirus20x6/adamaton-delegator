@@ -77,6 +77,16 @@ func (r *Router) Route(req RouteRequest) (*RouteResponse, error) {
 		statusMap[statuses[i].Provider] = &statuses[i]
 	}
 
+	// Publish quota-utilization gauges for every provider we have both config
+	// and a fresh status for. Doing it here (rather than a separate scrape
+	// loop) keeps the gauge in lockstep with the statuses the router actually
+	// evaluated, and costs nothing extra since we already hold them.
+	for provider, pc := range r.configs {
+		if status, ok := statusMap[provider]; ok {
+			observeQuotaUtilization(provider, status, pc.IsUnlimited())
+		}
+	}
+
 	// Find max cost for normalization
 	var maxCost float64
 	for _, pc := range r.configs {
@@ -224,6 +234,7 @@ func (r *Router) Route(req RouteRequest) (*RouteResponse, error) {
 				}, nil
 			}
 		}
+		RequestsRejected.WithLabelValues("no_providers").Inc()
 		return nil, fmt.Errorf("no providers available for request")
 	}
 
