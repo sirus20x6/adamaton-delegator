@@ -64,6 +64,12 @@ func NewPgStore(dsn string, maxTasks int, logger *logrus.Logger) (*PgStore, erro
 	return &PgStore{pool: pool, maxTasks: maxTasks, logger: logger}, nil
 }
 
+// Pool exposes the underlying pgxpool so sibling background workers
+// (e.g. the kanban stale-claim sweeper) can reuse the same connection
+// pool against the shared evo-schema database instead of opening a
+// second pool against the same DSN.
+func (s *PgStore) Pool() *pgxpool.Pool { return s.pool }
+
 // Close releases the underlying pool.
 func (s *PgStore) Close() error {
 	if s.pool != nil {
