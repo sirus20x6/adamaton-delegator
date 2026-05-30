@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
 	"net/url"
 	"os"
@@ -29,6 +30,20 @@ type kanbanClient struct {
 	http *http.Client
 }
 
+// Per-call deadline and retry tuning. The MCP request ctx (threaded from the
+// tool handler) is the outer bound; perCallTimeout caps any single attempt so
+// one wedged apiserver call can't hang the whole MCP tool invocation
+// indefinitely even if the client's ctx has no deadline. The retry budget is
+// intentionally small — these are interactive tool calls, not a background
+// job, so we'd rather surface a transient error quickly than stack seconds of
+// backoff in front of the operator.
+const (
+	perCallTimeout = 15 * time.Second
+	maxRetries     = 3 // total attempts = maxRetries (1 initial + up to 2 retries)
+	baseBackoff    = 100 * time.Millisecond
+	maxBackoff     = 2 * time.Second
+)
+
 func newKanbanClient() *kanbanClient {
 	base := os.Getenv("KANBAN_API_URL")
 	if base == "" {
@@ -45,42 +60,132 @@ func newKanbanClient() *kanbanClient {
 // JSON-encoded. On a non-2xx response the decoded body is returned as an
 // error so the caller can surface the apiserver's message (incl. 409
 // claim conflicts) verbatim. On success the raw JSON body is returned.
+//
+// The caller's ctx (the MCP request context) is honored and additionally
+// bounded by perCallTimeout per attempt. Idempotent requests (GET) are retried
+// with bounded exponential backoff + jitter on transient failures — network
+// errors and 5xx responses — so a momentary apiserver blip or restart doesn't
+// surface as a hard tool failure. Non-idempotent requests (POST: claim, move,
+// complete, release, ...) are NOT retried: replaying them could double-apply a
+// mutation, so a transient error is returned to the caller as-is.
 func (c *kanbanClient) do(ctx context.Context, method, path string, body any) (json.RawMessage, error) {
-	var reader io.Reader
+	var payload []byte
 	if body != nil {
 		b, err := json.Marshal(body)
 		if err != nil {
 			return nil, fmt.Errorf("marshal request: %w", err)
 		}
-		reader = bytes.NewReader(b)
+		payload = b
 	}
-	req, err := http.NewRequestWithContext(ctx, method, c.base+"/api/v1"+path, reader)
+
+	retryable := isIdempotent(method)
+
+	var lastErr error
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		if attempt > 0 {
+			// Back off before retrying. Honor ctx cancellation while waiting.
+			if err := sleepWithContext(ctx, backoffFor(attempt)); err != nil {
+				return nil, err
+			}
+		}
+
+		raw, retry, err := c.doOnce(ctx, method, path, payload, body != nil)
+		if err == nil {
+			return raw, nil
+		}
+		lastErr = err
+		// Stop early on a non-retryable outcome (4xx, marshal/build error,
+		// ctx cancellation) or when the method isn't safe to retry.
+		if !retry || !retryable {
+			return nil, err
+		}
+	}
+	return nil, lastErr
+}
+
+// doOnce performs a single HTTP attempt. The returned retry flag is true only
+// for transient failures (network error or 5xx) that a caller may retry; it is
+// false for context cancellation, request-build failures, and 4xx responses
+// (including 409 claim conflicts, which are a definitive answer, not a blip).
+func (c *kanbanClient) doOnce(ctx context.Context, method, path string, payload []byte, hasBody bool) (json.RawMessage, bool, error) {
+	attemptCtx, cancel := context.WithTimeout(ctx, perCallTimeout)
+	defer cancel()
+
+	var reader io.Reader
+	if hasBody {
+		reader = bytes.NewReader(payload)
+	}
+	req, err := http.NewRequestWithContext(attemptCtx, method, c.base+"/api/v1"+path, reader)
 	if err != nil {
-		return nil, fmt.Errorf("build request: %w", err)
+		return nil, false, fmt.Errorf("build request: %w", err)
 	}
-	if body != nil {
+	if hasBody {
 		req.Header.Set("Content-Type", "application/json")
 	}
 	req.Header.Set("Accept", "application/json")
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("call %s %s: %w", method, path, err)
+		// If the caller's ctx (not just our per-attempt deadline) is done,
+		// don't treat it as a retryable blip — the caller is giving up.
+		if ctx.Err() != nil {
+			return nil, false, fmt.Errorf("call %s %s: %w", method, path, ctx.Err())
+		}
+		// Network/transport error (connection refused during a restart, EOF,
+		// per-attempt timeout): retryable.
+		return nil, true, fmt.Errorf("call %s %s: %w", method, path, err)
 	}
 	defer resp.Body.Close()
 
 	raw, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("read response: %w", err)
+		if ctx.Err() != nil {
+			return nil, false, fmt.Errorf("read response: %w", ctx.Err())
+		}
+		return nil, true, fmt.Errorf("read response: %w", err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		msg := strings.TrimSpace(string(raw))
 		if msg == "" {
 			msg = resp.Status
 		}
-		return nil, fmt.Errorf("kanban api %s %s -> %d: %s", method, path, resp.StatusCode, msg)
+		retry := resp.StatusCode >= 500 // 5xx is transient; 4xx (incl. 409) is definitive.
+		return nil, retry, fmt.Errorf("kanban api %s %s -> %d: %s", method, path, resp.StatusCode, msg)
 	}
-	return json.RawMessage(raw), nil
+	return json.RawMessage(raw), false, nil
+}
+
+// isIdempotent reports whether a method is safe to retry without risking a
+// double-applied mutation. Only GET (and HEAD, for completeness) qualify; the
+// kanban/project mutations are all POST and must not be replayed.
+func isIdempotent(method string) bool {
+	return method == http.MethodGet || method == http.MethodHead
+}
+
+// backoffFor returns the exponential backoff for the given attempt (1-based for
+// the first retry) with full jitter, clamped to maxBackoff. Full jitter spreads
+// retries from concurrent MCP clients so they don't synchronize into a thundering
+// herd against a recovering apiserver.
+func backoffFor(attempt int) time.Duration {
+	d := baseBackoff << (attempt - 1) // attempt 1 -> base, 2 -> 2*base, ...
+	if d > maxBackoff || d <= 0 {
+		d = maxBackoff
+	}
+	// Full jitter in [0, d].
+	return time.Duration(rand.Int63n(int64(d) + 1))
+}
+
+// sleepWithContext sleeps for d or until ctx is done, whichever comes first.
+// Returns ctx.Err() if the context was cancelled during the wait.
+func sleepWithContext(ctx context.Context, d time.Duration) error {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
 }
 
 // --- tool argument types ---
