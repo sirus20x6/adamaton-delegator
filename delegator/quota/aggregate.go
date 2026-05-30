@@ -3,6 +3,7 @@ package quota
 import (
 	"context"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 
@@ -26,6 +27,11 @@ type AggregateConfig struct {
 	// SkipCCSaver disables the token-totals query entirely — useful in tests
 	// where the DB doesn't exist and we only exercise the rate-limit paths.
 	SkipCCSaver bool
+	// CCSaverCacheTTL bounds how long a cached token-totals snapshot may be
+	// served when the live CCSAVER read fails (DB unreadable / query error).
+	// Zero falls back to defaultCCSaverCacheTTL; negative disables the cached
+	// fallback entirely (always zero tokens on failure, the pre-cache behavior).
+	CCSaverCacheTTL time.Duration
 }
 
 func (c AggregateConfig) logger() *logrus.Logger {
@@ -42,6 +48,107 @@ func (c AggregateConfig) logger() *logrus.Logger {
 		return c.Gemini.Logger
 	}
 	return logrus.StandardLogger()
+}
+
+// defaultCCSaverCacheTTL is how long a cached token-totals snapshot is served
+// when the live CCSAVER read fails. Long enough to ride out a CCSAVER restart
+// or a brief mirror-replication hiccup, short enough that genuinely stale data
+// ages out instead of pinning the dashboard to a frozen value forever.
+const defaultCCSaverCacheTTL = 10 * time.Minute
+
+// ccSaverCacheTTL resolves the effective cache TTL: the configured value, or
+// the default when zero. A negative value disables the cache (handled by the
+// caller via a non-positive TTL never matching a fresh entry).
+func (c AggregateConfig) ccSaverCacheTTL() time.Duration {
+	if c.CCSaverCacheTTL == 0 {
+		return defaultCCSaverCacheTTL
+	}
+	return c.CCSaverCacheTTL
+}
+
+// tokenTotalsCacheEntry is one cached snapshot keyed by (db path, days window).
+type tokenTotalsCacheEntry struct {
+	totals   map[string]AgentTokenTotals
+	storedAt time.Time
+}
+
+// tokenTotalsCache is a process-wide, short-TTL cache of the last successful
+// GetTokenTotalsByAPIType result per (path, days). It exists so a momentary
+// CCSAVER outage doesn't zero the dashboard's per-agent token gauges — we serve
+// the last-known totals until the entry ages past the TTL. Keyed by path so a
+// test DB and the production DB never alias.
+var (
+	tokenTotalsCacheMu sync.Mutex
+	tokenTotalsCache   = map[string]tokenTotalsCacheEntry{}
+)
+
+func tokenTotalsCacheKey(path string, days int) string {
+	return path + "\x00" + strconv.Itoa(days)
+}
+
+// loadLiveTokenTotals opens CCSAVER and runs the token-totals query. It returns
+// (totals, true) only on a fully successful live read; any open/query failure
+// logs a warning and returns ok=false so the caller can fall back to the cache.
+func loadLiveTokenTotals(path string, days int, logger *logrus.Logger) (map[string]AgentTokenTotals, bool) {
+	cs, err := OpenCCSaver(CCSaverConfig{Path: path, Logger: logger})
+	if err != nil {
+		logger.WithError(err).Warn("ccsaver: db unreadable; will try cached token totals")
+		return nil, false
+	}
+	tt, qerr := cs.GetTokenTotalsByAPIType(days)
+	cs.Close()
+	if qerr != nil {
+		logger.WithError(qerr).Warn("ccsaver: token totals query failed; will try cached token totals")
+		return nil, false
+	}
+	return tt, true
+}
+
+// storeTokenTotalsCache records a successful live read for later fallback. The
+// stored map is cloned so a later mutation of the returned totals can't corrupt
+// the cache.
+func storeTokenTotalsCache(path string, days int, totals map[string]AgentTokenTotals) {
+	tokenTotalsCacheMu.Lock()
+	defer tokenTotalsCacheMu.Unlock()
+	tokenTotalsCache[tokenTotalsCacheKey(path, days)] = tokenTotalsCacheEntry{
+		totals:   cloneTokenTotals(totals),
+		storedAt: time.Now(),
+	}
+}
+
+// cachedTokenTotals returns a cached snapshot if one exists and is younger than
+// ttl. A non-positive ttl disables the fallback (ok=false). The returned map is
+// a clone so the caller may freely mutate it.
+func cachedTokenTotals(path string, days int, ttl time.Duration) (map[string]AgentTokenTotals, bool) {
+	if ttl <= 0 {
+		return nil, false
+	}
+	tokenTotalsCacheMu.Lock()
+	defer tokenTotalsCacheMu.Unlock()
+	entry, ok := tokenTotalsCache[tokenTotalsCacheKey(path, days)]
+	if !ok {
+		return nil, false
+	}
+	if time.Since(entry.storedAt) > ttl {
+		return nil, false
+	}
+	return cloneTokenTotals(entry.totals), true
+}
+
+// cloneTokenTotals deep-copies a token-totals map (including the per-entry
+// Models slice) so cache reads and writes never share backing storage with
+// caller-visible values.
+func cloneTokenTotals(in map[string]AgentTokenTotals) map[string]AgentTokenTotals {
+	out := make(map[string]AgentTokenTotals, len(in))
+	for k, v := range in {
+		if v.Models != nil {
+			models := make([]string, len(v.Models))
+			copy(models, v.Models)
+			v.Models = models
+		}
+		out[k] = v
+	}
+	return out
 }
 
 // GetAllAgentUsage returns a unified per-agent usage slice. Token counts come
@@ -71,22 +178,25 @@ func GetAllAgentUsage(ctx context.Context, days int, cfg AggregateConfig) ([]Age
 		cfg.Gemini.CCSaverPath = cfg.CCSaverPath
 	}
 
-	// Token totals from CCSAVER — the authoritative source. On any failure we
-	// fall through with an empty map (zero tokens + a warning) rather than
-	// reviving the per-CLI session-file scan; a DB-only environment is the
-	// expected deployment.
+	// Token totals from CCSAVER — the authoritative source. On a live read we
+	// cache the result; on a transient failure (DB unreadable / query error) we
+	// serve the last-known snapshot for up to CCSaverCacheTTL so the dashboard
+	// shows last-known usage during a CCSAVER outage instead of snapping every
+	// agent to "0 used". A DB-only environment is still the expected deployment,
+	// so once the cache expires (or if it was never populated) we fall through
+	// with an empty map + a warning rather than reviving the per-CLI scan.
 	tokenTotals := map[string]AgentTokenTotals{}
 	if !cfg.SkipCCSaver {
-		if cs, err := OpenCCSaver(CCSaverConfig{Path: cfg.CCSaverPath, Logger: logger}); err == nil {
-			tt, qerr := cs.GetTokenTotalsByAPIType(days)
-			cs.Close()
-			if qerr != nil {
-				logger.WithError(qerr).Warn("ccsaver: token totals query failed; agent tokens will be zero")
-			} else {
-				tokenTotals = tt
-			}
-		} else {
-			logger.WithError(err).Warn("ccsaver: db unreadable; agent tokens will be zero")
+		path := cfg.CCSaverPath
+		if path == "" {
+			path = DefaultCCSaverPath()
+		}
+		if tt, ok := loadLiveTokenTotals(path, days, logger); ok {
+			tokenTotals = tt
+			storeTokenTotalsCache(path, days, tt)
+		} else if cached, ok := cachedTokenTotals(path, days, cfg.ccSaverCacheTTL()); ok {
+			logger.Warn("ccsaver: live read failed; serving last-known token totals from cache")
+			tokenTotals = cached
 		}
 	}
 

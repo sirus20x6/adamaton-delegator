@@ -37,8 +37,10 @@ var QuotaUtilization = prometheus.NewGaugeVec(
 //
 // Labels:
 //
-//	reason — short, low-cardinality cause. Currently "no_providers" (the
-//	         router found zero viable candidates). Keep this set closed.
+//	reason — short, low-cardinality cause. One of "no_providers" (the router
+//	         found zero viable candidates) or "all_at_concurrency_cap" (every
+//	         cloud provider was momentarily at its concurrency cap and no local
+//	         fallback was available). Keep this set closed.
 var RequestsRejected = prometheus.NewCounterVec(
 	prometheus.CounterOpts{
 		Name: "budget_requests_rejected_total",
