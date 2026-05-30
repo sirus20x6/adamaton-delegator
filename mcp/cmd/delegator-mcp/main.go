@@ -614,9 +614,12 @@ func registerTools(server *mcp.Server, orch *delegator.Orchestrator, gate *tempo
 	// search returns nothing useful.
 	registerContextTools(server, orch, dsn, logger)
 
-	// Kanban tools: thin REST clients of the apiserver kanban API
-	// (board/column/card store shared with the dashboard). Base URL
-	// from KANBAN_API_URL (default http://localhost:9123).
+	// Project + kanban tools: thin REST clients of the apiserver projects
+	// API (the dashboard's project registry + per-project boards). Base URL
+	// from KANBAN_API_URL (default http://localhost:9123). project_* lets an
+	// orchestrator discover projects (and their host) to feed project_id into
+	// the kanban_* tools.
+	registerProjectTools(server, logger)
 	registerKanbanTools(server, logger)
 
 	mcp.AddTool(server, &mcp.Tool{
