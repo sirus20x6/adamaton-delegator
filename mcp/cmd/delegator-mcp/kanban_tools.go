@@ -212,6 +212,10 @@ type kanbanListReadyArgs struct {
 	BoardID string `json:"board_id" jsonschema:"the board ID whose ready (unclaimed) cards to list"`
 }
 
+type kanbanGetBoardArgs struct {
+	BoardID string `json:"board_id" jsonschema:"the board ID to fetch in full (all columns + every card)"`
+}
+
 type kanbanClaimCardArgs struct {
 	CardID  string `json:"card_id" jsonschema:"the card ID to claim"`
 	AgentID string `json:"agent_id" jsonschema:"the agent ID claiming the card; returned claim_token is required for later move/complete/release"`
@@ -322,6 +326,21 @@ func registerKanbanTools(server *mcp.Server, logger *logrus.Logger) {
 		}
 		raw, err := client.do(ctx, http.MethodGet,
 			fmt.Sprintf("/kanban/boards/%s/ready", url.PathEscape(args.BoardID)), nil)
+		if err != nil {
+			return errResult(err.Error()), nil, nil
+		}
+		return jsonResult(raw), nil, nil
+	})
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "kanban_get_board",
+		Description: "Fetch a board in full: the board plus ALL its columns and every card in each (Backlog, Ready, In Progress, Review, Done). Use this to see cards that kanban_list_ready_cards omits (it returns only the unclaimed Ready queue) — e.g. to dedup before adding cards or to review Backlog/In-Progress/Done. Returns {board, columns:[{...,cards:[...]}]}.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args kanbanGetBoardArgs) (*mcp.CallToolResult, any, error) {
+		if args.BoardID == "" {
+			return errResult("board_id is required"), nil, nil
+		}
+		raw, err := client.do(ctx, http.MethodGet,
+			fmt.Sprintf("/kanban/boards/%s", url.PathEscape(args.BoardID)), nil)
 		if err != nil {
 			return errResult(err.Error()), nil, nil
 		}
