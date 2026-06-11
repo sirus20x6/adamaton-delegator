@@ -276,3 +276,122 @@ func TestBackoffFor(t *testing.T) {
 		}
 	}
 }
+
+// TestKanbanClient_PatchCardUpdate verifies the PATCH path used by
+// kanban_update_card: method, path, and partial body are threaded through and
+// the updated card comes back on 200.
+func TestKanbanClient_PatchCardUpdate(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPatch {
+			t.Errorf("unexpected method %q", r.Method)
+		}
+		if r.URL.Path != "/api/v1/kanban/cards/c1" {
+			t.Errorf("unexpected path %q", r.URL.Path)
+		}
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode body: %v", err)
+		}
+		if body["title"] != "renamed" || body["priority"] != "high" {
+			t.Errorf("fields not threaded: %+v", body)
+		}
+		if _, present := body["body"]; present {
+			t.Errorf("unset field leaked into PATCH body: %+v", body)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"c1","title":"renamed","priority":"high"}`))
+	}))
+	defer srv.Close()
+
+	c := newTestKanbanClient(srv.URL)
+	raw, err := c.do(context.Background(), http.MethodPatch, "/kanban/cards/c1",
+		map[string]any{"title": "renamed", "priority": "high"})
+	if err != nil {
+		t.Fatalf("do: %v", err)
+	}
+	var card map[string]any
+	if err := json.Unmarshal(raw, &card); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if card["title"] != "renamed" {
+		t.Fatalf("unexpected body: %s", raw)
+	}
+}
+
+// TestKanbanClient_PatchClaimedColumn409 locks in the claimed-card guard
+// surface: the apiserver's 409 for a column change on a claimed card comes
+// back verbatim and is not retried.
+func TestKanbanClient_PatchClaimedColumn409(t *testing.T) {
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"error":"card is claimed; move it via /move with the claim token"}`))
+	}))
+	defer srv.Close()
+
+	c := newTestKanbanClient(srv.URL)
+	_, err := c.do(context.Background(), http.MethodPatch, "/kanban/cards/c1",
+		map[string]any{"column_id": "col-done"})
+	if err == nil {
+		t.Fatal("expected error on 409")
+	}
+	if !strings.Contains(err.Error(), "409") || !strings.Contains(err.Error(), "claim token") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("409 should not be retried, saw %d calls", calls)
+	}
+}
+
+// TestKanbanClient_DeleteBoard verifies the DELETE path used by
+// kanban_delete_board / kanban_delete_card: bodyless request, JSON ack back.
+func TestKanbanClient_DeleteBoard(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete {
+			t.Errorf("unexpected method %q", r.Method)
+		}
+		if r.URL.Path != "/api/v1/kanban/boards/b1" {
+			t.Errorf("unexpected path %q", r.URL.Path)
+		}
+		if r.ContentLength > 0 {
+			t.Errorf("DELETE should be bodyless, got %d bytes", r.ContentLength)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"deleted":true,"id":"b1"}`))
+	}))
+	defer srv.Close()
+
+	c := newTestKanbanClient(srv.URL)
+	raw, err := c.do(context.Background(), http.MethodDelete, "/kanban/boards/b1", nil)
+	if err != nil {
+		t.Fatalf("do: %v", err)
+	}
+	var res map[string]any
+	if err := json.Unmarshal(raw, &res); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if res["deleted"] != true || res["id"] != "b1" {
+		t.Fatalf("unexpected body: %s", raw)
+	}
+}
+
+// TestKanbanClient_DeleteNotRetriedOn5xx: DELETE is not in the conservative
+// idempotent-retry set, so a 500 surfaces after exactly one attempt.
+func TestKanbanClient_DeleteNotRetriedOn5xx(t *testing.T) {
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	c := newTestKanbanClient(srv.URL)
+	_, err := c.do(context.Background(), http.MethodDelete, "/kanban/boards/b1", nil)
+	if err == nil {
+		t.Fatal("expected error on 500")
+	}
+	if calls != 1 {
+		t.Fatalf("DELETE should not be retried, saw %d calls", calls)
+	}
+}

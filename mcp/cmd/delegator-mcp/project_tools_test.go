@@ -171,3 +171,46 @@ func TestProjectRegister_PostBody(t *testing.T) {
 		t.Fatalf("display_name should be absent when unset: %+v", gotBody)
 	}
 }
+
+// TestProjectClient_Unregister204 verifies the DELETE /projects/{id} path used
+// by project_unregister: the apiserver's 204 No Content (empty body) is a
+// success, not a parse error.
+func TestProjectClient_Unregister204(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete {
+			t.Errorf("unexpected method %q", r.Method)
+		}
+		if r.URL.Path != "/api/v1/projects/proj-1" {
+			t.Errorf("unexpected path %q", r.URL.Path)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	c := newTestKanbanClient(srv.URL)
+	raw, err := c.do(context.Background(), http.MethodDelete, "/projects/proj-1", nil)
+	if err != nil {
+		t.Fatalf("do: %v", err)
+	}
+	if len(raw) != 0 {
+		t.Fatalf("expected empty 204 body, got %q", raw)
+	}
+}
+
+// TestProjectClient_UnregisterMissing404 locks in the not-found surface.
+func TestProjectClient_UnregisterMissing404(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"error":"project not found"}`))
+	}))
+	defer srv.Close()
+
+	c := newTestKanbanClient(srv.URL)
+	_, err := c.do(context.Background(), http.MethodDelete, "/projects/proj-missing", nil)
+	if err == nil {
+		t.Fatal("expected error on 404")
+	}
+	if !strings.Contains(err.Error(), "404") || !strings.Contains(err.Error(), "project not found") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}

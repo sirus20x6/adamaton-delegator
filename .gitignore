@@ -1,0 +1,3 @@
+
+# go build artifact in the mcp cmd dir (50MB binary)
+mcp/cmd/delegator-mcp/delegator-mcp

@@ -241,6 +241,23 @@ type kanbanReleaseCardArgs struct {
 	ClaimToken string `json:"claim_token" jsonschema:"the claim token from kanban_claim_card; must match"`
 }
 
+type kanbanUpdateCardArgs struct {
+	CardID     string `json:"card_id" jsonschema:"the card ID to update"`
+	Title      string `json:"title,omitempty" jsonschema:"new card title"`
+	Body       string `json:"body,omitempty" jsonschema:"new card body / description"`
+	Priority   string `json:"priority,omitempty" jsonschema:"new priority"`
+	Difficulty string `json:"difficulty,omitempty" jsonschema:"new difficulty"`
+	ColumnID   string `json:"column_id,omitempty" jsonschema:"column to move the card into; only valid while the card is unclaimed (claimed cards move via kanban_move_card)"`
+}
+
+type kanbanDeleteCardArgs struct {
+	CardID string `json:"card_id" jsonschema:"the card ID to delete (removes its comments too)"`
+}
+
+type kanbanDeleteBoardArgs struct {
+	BoardID string `json:"board_id" jsonschema:"the board ID to delete (cascades columns, cards, comments)"`
+}
+
 type kanbanAddCommentArgs struct {
 	CardID string `json:"card_id" jsonschema:"the card ID to comment on"`
 	Author string `json:"author" jsonschema:"the comment author"`
@@ -454,6 +471,70 @@ func registerKanbanTools(server *mcp.Server, logger *logrus.Logger) {
 		raw, err := client.do(ctx, http.MethodPost,
 			fmt.Sprintf("/kanban/cards/%s/comment", url.PathEscape(args.CardID)),
 			map[string]any{"author": args.Author, "text": args.Text})
+		if err != nil {
+			return errResult(err.Error()), nil, nil
+		}
+		return jsonResult(raw), nil, nil
+	})
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "kanban_update_card",
+		Description: "Edit a card's title/body/priority/difficulty, or reposition an UNCLAIMED card into another column via column_id (claimed cards move via kanban_move_card with their claim_token). Returns the updated Card.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args kanbanUpdateCardArgs) (*mcp.CallToolResult, any, error) {
+		if args.CardID == "" {
+			return errResult("card_id is required"), nil, nil
+		}
+		body := map[string]any{}
+		if args.Title != "" {
+			body["title"] = args.Title
+		}
+		if args.Body != "" {
+			body["body"] = args.Body
+		}
+		if args.Priority != "" {
+			body["priority"] = args.Priority
+		}
+		if args.Difficulty != "" {
+			body["difficulty"] = args.Difficulty
+		}
+		if args.ColumnID != "" {
+			body["column_id"] = args.ColumnID
+		}
+		if len(body) == 0 {
+			return errResult("at least one of title, body, priority, difficulty, column_id is required"), nil, nil
+		}
+		raw, err := client.do(ctx, http.MethodPatch,
+			fmt.Sprintf("/kanban/cards/%s", url.PathEscape(args.CardID)), body)
+		if err != nil {
+			return errResult(err.Error()), nil, nil
+		}
+		return jsonResult(raw), nil, nil
+	})
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "kanban_delete_card",
+		Description: "Permanently delete a card and its comments. Irreversible — released/stale cards can also just be left in place or moved instead.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args kanbanDeleteCardArgs) (*mcp.CallToolResult, any, error) {
+		if args.CardID == "" {
+			return errResult("card_id is required"), nil, nil
+		}
+		raw, err := client.do(ctx, http.MethodDelete,
+			fmt.Sprintf("/kanban/cards/%s", url.PathEscape(args.CardID)), nil)
+		if err != nil {
+			return errResult(err.Error()), nil, nil
+		}
+		return jsonResult(raw), nil, nil
+	})
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "kanban_delete_board",
+		Description: "Permanently delete a board and everything on it (columns, cards, comments). Irreversible.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args kanbanDeleteBoardArgs) (*mcp.CallToolResult, any, error) {
+		if args.BoardID == "" {
+			return errResult("board_id is required"), nil, nil
+		}
+		raw, err := client.do(ctx, http.MethodDelete,
+			fmt.Sprintf("/kanban/boards/%s", url.PathEscape(args.BoardID)), nil)
 		if err != nil {
 			return errResult(err.Error()), nil, nil
 		}
