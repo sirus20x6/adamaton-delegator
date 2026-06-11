@@ -29,6 +29,10 @@ type projectRegisterArgs struct {
 	DisplayName string `json:"display_name,omitempty" jsonschema:"optional display name; defaults to the folder basename"`
 }
 
+type projectUnregisterArgs struct {
+	ProjectID string `json:"project_id" jsonschema:"the project ID to unregister"`
+}
+
 type projectTreeArgs struct {
 	ProjectID string `json:"project_id" jsonschema:"the project ID"`
 	Path      string `json:"path,omitempty" jsonschema:"path relative to the project root; empty = the root"`
@@ -96,6 +100,25 @@ func registerProjectTools(server *mcp.Server, logger *logrus.Logger) {
 		raw, err := client.do(ctx, http.MethodPost, "/projects", body)
 		if err != nil {
 			return errResult(err.Error()), nil, nil
+		}
+		return jsonResult(raw), nil, nil
+	})
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "project_unregister",
+		Description: "Unregister a project from the registry. Files on disk are NOT touched; kanban boards hanging off the project are removed by the DB cascade. Irreversible (re-register with project_register).",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args projectUnregisterArgs) (*mcp.CallToolResult, any, error) {
+		if args.ProjectID == "" {
+			return errResult("project_id is required"), nil, nil
+		}
+		raw, err := client.do(ctx, http.MethodDelete,
+			fmt.Sprintf("/projects/%s", url.PathEscape(args.ProjectID)), nil)
+		if err != nil {
+			return errResult(err.Error()), nil, nil
+		}
+		// The apiserver replies 204 No Content; synthesize a stable result.
+		if len(raw) == 0 {
+			return jsonResult(map[string]any{"deleted": true, "id": args.ProjectID}), nil, nil
 		}
 		return jsonResult(raw), nil, nil
 	})
