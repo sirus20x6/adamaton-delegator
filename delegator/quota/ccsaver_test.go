@@ -416,3 +416,45 @@ func sprintInt64(v int64) string {
 	b = append(b, digits[i:]...)
 	return string(b)
 }
+
+func TestCCSaver_SumTokensInWindow(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ccs.db")
+	base := time.Now().UTC()
+	at := func(d time.Duration) string { return base.Add(d).Format(time.RFC3339) }
+	buildCCSaverDB(t, path, []ccsRow{
+		// In window, matching api_types → counted.
+		{APIType: "openai", InputTokens: 100, OutputTokens: 50, Timestamp: at(-5 * time.Minute)},
+		{APIType: "openai-codex", InputTokens: 200, OutputTokens: 70, Timestamp: at(-2 * time.Minute)},
+		// Different api_type → excluded.
+		{APIType: "gemini", InputTokens: 999, OutputTokens: 999, Timestamp: at(-3 * time.Minute)},
+		// Out of window (too old) → excluded.
+		{APIType: "openai", InputTokens: 1000, OutputTokens: 1000, Timestamp: at(-30 * time.Minute)},
+	})
+	cs, err := OpenCCSaver(CCSaverConfig{Path: path})
+	if err != nil {
+		t.Fatalf("OpenCCSaver: %v", err)
+	}
+	defer cs.Close()
+
+	in, out, err := cs.SumTokensInWindow(
+		[]string{"openai", "openai-codex"},
+		base.Add(-10*time.Minute), base.Add(time.Minute),
+	)
+	if err != nil {
+		t.Fatalf("SumTokensInWindow: %v", err)
+	}
+	if in != 300 || out != 120 {
+		t.Fatalf("expected in=300 out=120 (window+api_type filtered), got in=%d out=%d", in, out)
+	}
+
+	// Empty api_types → (0,0,nil), no query.
+	if i, o, e := cs.SumTokensInWindow(nil, base.Add(-time.Hour), base); e != nil || i != 0 || o != 0 {
+		t.Fatalf("empty api_types: got %d/%d err=%v", i, o, e)
+	}
+
+	// Nil receiver is safe.
+	var nilcs *CCSaver
+	if i, o, e := nilcs.SumTokensInWindow([]string{"openai"}, base, base); e != nil || i != 0 || o != 0 {
+		t.Fatalf("nil receiver: got %d/%d err=%v", i, o, e)
+	}
+}

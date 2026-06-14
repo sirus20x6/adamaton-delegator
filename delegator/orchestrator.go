@@ -67,6 +67,12 @@ type Orchestrator struct {
 	// delegation behaves exactly as before.
 	Events TaskEvents
 
+	// Tokens, when non-nil, supplies a delegation's REAL token usage from
+	// CCSAVER (the proxy that captured every internal call the agent made),
+	// so budget reporting reflects actual spend instead of the coarse
+	// prompt+stdout estimate. Nil → report() uses the estimate.
+	Tokens TokenReader
+
 	// runningCancels lets cancel_task interrupt an in-flight delegation.
 	runningCancels sync.Map // taskID → context.CancelFunc
 
@@ -322,26 +328,71 @@ func (o *Orchestrator) report(task *Task, out *cli.CLIOutput) {
 	if o.Budget == nil || task.Provider == "" {
 		return
 	}
-	tokens := estimateTokens(task.Prompt, out)
-	if tokens <= 0 {
-		return
-	}
 	final, ok := o.Store.Get(task.ID)
 	if !ok {
 		return
 	}
+
+	// Prefer REAL token usage from CCSAVER (captures the agent's whole
+	// internal multi-turn loop); fall back to the coarse prompt+stdout
+	// estimate when no reader is wired or the window is empty.
+	promptTok, completionTok, totalTok := o.realTokens(final)
+	if totalTok <= 0 {
+		totalTok = estimateTokens(task.Prompt, out)
+	}
+	if totalTok <= 0 {
+		return
+	}
+
 	success := final.Status == StatusCompleted
 	rep := budget.ReportRequest{
-		Provider:       task.Provider,
-		Model:          task.Model,
-		TotalTokens:    tokens,
-		TaskID:         task.ID,
-		TaskComplexity: task.Difficulty.ToComplexity(),
-		Success:        &success,
+		Provider:         task.Provider,
+		Model:            task.Model,
+		PromptTokens:     promptTok,
+		CompletionTokens: completionTok,
+		TotalTokens:      totalTok,
+		TaskID:           task.ID,
+		TaskComplexity:   task.Difficulty.ToComplexity(),
+		Success:          &success,
 	}
 	if _, err := o.Budget.Report(rep); err != nil {
 		o.Logger.WithError(err).WithField("task_id", task.ID).Warn("budget report failed")
 	}
+}
+
+// realTokens reads the provider's actual input/output tokens over the task's
+// run window from the CCSAVER reader. Returns (0,0,0) when no reader is
+// wired, the provider has no api_type mapping, the read errors, or the
+// window is empty — the caller then falls back to the estimate.
+//
+// Best-effort + approximate: CCSAVER rows aren't keyed by task_id, so this
+// attributes by the [started, now] time window. Under concurrent
+// same-provider tasks the windows overlap and totals can double-count —
+// deliberately erring toward OVER-counting (conservative for budget
+// enforcement) rather than the estimate's drastic under-count (which never
+// sees the agent's internal loop).
+func (o *Orchestrator) realTokens(final *Task) (prompt, completion, total int) {
+	if o.Tokens == nil {
+		return 0, 0, 0
+	}
+	apiTypes := apiTypesForProvider(final.Provider)
+	if len(apiTypes) == 0 {
+		return 0, 0, 0
+	}
+	start := final.StartedAt
+	if start.IsZero() {
+		start = final.CreatedAt
+	}
+	in, outTok, err := o.Tokens.SumTokensInWindow(apiTypes, start, time.Now())
+	if err != nil {
+		o.Logger.WithError(err).WithField("task_id", final.ID).
+			Debug("real-token read failed; using estimate")
+		return 0, 0, 0
+	}
+	if in+outTok <= 0 {
+		return 0, 0, 0
+	}
+	return int(in), int(outTok), int(in + outTok)
 }
 
 // estimateTokens is a coarse approximation when the CLI doesn't emit a
