@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -493,6 +494,24 @@ func (g *temporalGate) clientIfUp() client.Client {
 	return g.client
 }
 
+// reachable is a fast TCP pre-probe of the Temporal address. Without it the
+// delegate_task hot path pays ensureClient's full dial watchdog
+// (temporalDialTimeout, 5s) on EVERY call while Temporal is down — turning
+// the common offline case into a multi-second tax per delegation. A ~250ms
+// refused connection lets delegate_task fail over to the in-process path
+// promptly. Once the gate is already wired, skip the probe.
+func (g *temporalGate) reachable() bool {
+	if g.clientIfUp() != nil {
+		return true
+	}
+	conn, err := net.DialTimeout("tcp", g.addr, 250*time.Millisecond)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
+}
+
 // localBudget adapts budget.Router + budget.Tracker into the orchestrator's
 // BudgetClient interface. Routing reads through Router; reporting writes
 // through Tracker. No HTTP hop — this is a single-binary MCP server.
@@ -606,35 +625,39 @@ func registerTools(server *mcp.Server, orch *delegator.Orchestrator, gate *tempo
 		// Durable path: run the delegation as a Temporal workflow keyed by
 		// the task id, so an MCP/worker restart re-dispatches it instead of
 		// silently orphaning the task. Falls back to the in-process path when
-		// Temporal is unreachable, so delegate_task still works offline.
-		if c, gerr := gate.ensureClient(); gerr == nil {
-			orch.Store.Put(&delegator.Task{
-				ID: req.TaskID, Agent: agent, Provider: provider,
-				Difficulty: req.Difficulty, Priority: req.Priority,
-				Prompt: req.Prompt, WorkingDir: req.WorkingDir, Model: req.Model,
-				Status: delegator.StatusPending, CreatedAt: time.Now().UTC(),
-			})
-			_, werr := c.ExecuteWorkflow(context.Background(),
-				client.StartWorkflowOptions{ID: req.TaskID, TaskQueue: delegationTaskQueue},
-				workflows.DelegationWorkflow,
-				activities.DelegationInput{
-					TaskID: req.TaskID, Prompt: req.Prompt,
-					Difficulty: string(req.Difficulty), Priority: string(req.Priority),
-					AgentHint: agent, WorkingDir: req.WorkingDir, Model: req.Model,
-					TimeoutSecs: req.TimeoutSecs,
+		// Temporal is unreachable, so delegate_task still works offline. The
+		// reachable() pre-probe keeps the offline case fast (~250ms) instead
+		// of paying the full dial watchdog on every call.
+		if gate.reachable() {
+			if c, gerr := gate.ensureClient(); gerr == nil {
+				orch.Store.Put(&delegator.Task{
+					ID: req.TaskID, Agent: agent, Provider: provider,
+					Difficulty: req.Difficulty, Priority: req.Priority,
+					Prompt: req.Prompt, WorkingDir: req.WorkingDir, Model: req.Model,
+					Status: delegator.StatusPending, CreatedAt: time.Now().UTC(),
 				})
-			if werr == nil {
-				return jsonResult(map[string]any{
-					"task_id":   req.TaskID,
-					"agent":     agent,
-					"provider":  provider,
-					"status":    string(delegator.StatusPending),
-					"execution": "durable",
-				}), nil, nil
+				_, werr := c.ExecuteWorkflow(context.Background(),
+					client.StartWorkflowOptions{ID: req.TaskID, TaskQueue: delegationTaskQueue},
+					workflows.DelegationWorkflow,
+					activities.DelegationInput{
+						TaskID: req.TaskID, Prompt: req.Prompt,
+						Difficulty: string(req.Difficulty), Priority: string(req.Priority),
+						AgentHint: agent, WorkingDir: req.WorkingDir, Model: req.Model,
+						TimeoutSecs: req.TimeoutSecs,
+					})
+				if werr == nil {
+					return jsonResult(map[string]any{
+						"task_id":   req.TaskID,
+						"agent":     agent,
+						"provider":  provider,
+						"status":    string(delegator.StatusPending),
+						"execution": "durable",
+					}), nil, nil
+				}
+				logger.WithError(werr).Warn("durable delegate: ExecuteWorkflow failed; running in-process")
+			} else {
+				logger.WithError(gerr).Debug("temporal reachable but client init failed; running in-process")
 			}
-			logger.WithError(werr).Warn("durable delegate: ExecuteWorkflow failed; running in-process")
-		} else {
-			logger.WithError(gerr).Debug("temporal unavailable; running delegate_task in-process")
 		}
 
 		// In-process fallback (Temporal down or ExecuteWorkflow failed). req
