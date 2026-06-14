@@ -9,8 +9,8 @@ import (
 
 	"github.com/sirupsen/logrus"
 
-	"github.com/sirus20x6/adamaton-delegator/delegator/budget"
 	"github.com/sirus20x6/adamaton-core/executor/cli"
+	"github.com/sirus20x6/adamaton-delegator/delegator/budget"
 )
 
 // fakeBudget is an in-test BudgetClient that records calls and returns
@@ -20,13 +20,23 @@ type fakeBudget struct {
 	routeResp   *budget.RouteResponse
 	routeErr    error
 	reportCalls []budget.ReportRequest
+	lastReq     budget.RouteRequest
 }
 
-func (f *fakeBudget) Route(_ budget.RouteRequest) (*budget.RouteResponse, error) {
+func (f *fakeBudget) Route(req budget.RouteRequest) (*budget.RouteResponse, error) {
+	f.mu.Lock()
+	f.lastReq = req
+	f.mu.Unlock()
 	if f.routeErr != nil {
 		return nil, f.routeErr
 	}
 	return f.routeResp, nil
+}
+
+func (f *fakeBudget) lastRouteReq() budget.RouteRequest {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lastReq
 }
 
 func (f *fakeBudget) Report(req budget.ReportRequest) (*budget.ReportResponse, error) {
@@ -309,5 +319,72 @@ func TestTaskStore_AllInFlightExceedsCap(t *testing.T) {
 	s.Put(&Task{ID: "running3", Status: StatusRunning, CreatedAt: time.Now()})
 	if got := len(s.List("", "")); got != 3 {
 		t.Errorf("expected 3 retained running tasks (cap exceeded but none evictable), got %d", got)
+	}
+}
+
+func TestOrchestrator_InflightCounter(t *testing.T) {
+	o := New(&fakeBudget{}, fakeCLI(t, "fake", "x"), nil)
+
+	// Empty → nil snapshot (preserves the router's pre-load behaviour).
+	if snap := o.inflightSnapshot(); snap != nil {
+		t.Fatalf("expected nil snapshot when idle, got %v", snap)
+	}
+
+	o.incrInflight(budget.ProviderOpenAI)
+	o.incrInflight(budget.ProviderOpenAI)
+	o.incrInflight(budget.ProviderGemini)
+	o.incrInflight("") // empty provider must be ignored
+
+	snap := o.inflightSnapshot()
+	if snap[budget.ProviderOpenAI] != 2 || snap[budget.ProviderGemini] != 1 {
+		t.Fatalf("unexpected snapshot: %v", snap)
+	}
+	if _, ok := snap[""]; ok {
+		t.Errorf("empty provider must not appear in snapshot")
+	}
+
+	// Snapshot is a copy — mutating it must not corrupt internal state.
+	snap[budget.ProviderOpenAI] = 99
+	if o.inflightSnapshot()[budget.ProviderOpenAI] != 2 {
+		t.Errorf("snapshot must be a defensive copy")
+	}
+
+	o.decrInflight(budget.ProviderGemini) // 1 → 0, key removed
+	o.decrInflight(budget.ProviderOpenAI) // 2 → 1
+	final := o.inflightSnapshot()
+	if final[budget.ProviderOpenAI] != 1 {
+		t.Errorf("expected openai=1 after decr, got %d", final[budget.ProviderOpenAI])
+	}
+	if _, ok := final[budget.ProviderGemini]; ok {
+		t.Errorf("gemini key should be deleted at zero, got %v", final)
+	}
+}
+
+func TestOrchestrator_PassesProviderLoadToRouter(t *testing.T) {
+	cli := fakeCLI(t, "fake", "ok")
+	fb := &fakeBudget{routeResp: &budget.RouteResponse{Provider: budget.ProviderOpenAI, Model: "gpt-4o"}}
+	o := newTestOrchestrator(t, fb, cli)
+
+	// Simulate an already-outstanding delegation on the openai provider.
+	o.incrInflight(budget.ProviderOpenAI)
+
+	task, err := o.Delegate(context.Background(), DelegateRequest{
+		Prompt:     "do something",
+		Difficulty: DifficultyMedium,
+	})
+	if err != nil {
+		t.Fatalf("Delegate: %v", err)
+	}
+	// The router must have seen the pre-existing in-flight task as load
+	// (the new task's own increment happens after routing, so it's 1).
+	if got := fb.lastRouteReq().ProviderLoad[budget.ProviderOpenAI]; got != 1 {
+		t.Fatalf("expected ProviderLoad[openai]=1 at route time, got %d (load=%v)",
+			got, fb.lastRouteReq().ProviderLoad)
+	}
+
+	// Once the task finishes, both increments unwind back to the seeded one.
+	waitForStatus(t, o.Store, task.ID, StatusCompleted, 3*time.Second)
+	if got := o.inflightSnapshot()[budget.ProviderOpenAI]; got != 1 {
+		t.Fatalf("expected openai back to the seeded 1 after completion, got %d", got)
 	}
 }

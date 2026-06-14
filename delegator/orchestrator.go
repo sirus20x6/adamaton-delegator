@@ -12,9 +12,9 @@ import (
 
 	"github.com/sirupsen/logrus"
 
+	"github.com/sirus20x6/adamaton-core/executor/cli"
 	"github.com/sirus20x6/adamaton-delegator/delegator/budget"
 	"github.com/sirus20x6/adamaton-delegator/delegator/skillsclient"
-	"github.com/sirus20x6/adamaton-core/executor/cli"
 )
 
 // BudgetClient is the orchestrator's narrow view of the budget router. The
@@ -63,6 +63,15 @@ type Orchestrator struct {
 
 	// runningCancels lets cancel_task interrupt an in-flight delegation.
 	runningCancels sync.Map // taskID → context.CancelFunc
+
+	// inflight counts this orchestrator's outstanding delegations per
+	// provider, so chooseAgent can hand the budget router live
+	// ProviderLoad. Without it the router's load-spreading penalty and
+	// MaxConcurrency hard-filter never fire — the field stays nil and the
+	// single cheapest provider absorbs every concurrent background task.
+	// Guarded by inflightMu.
+	inflightMu sync.Mutex
+	inflight   map[budget.Provider]int
 }
 
 // DefaultProviderToAgent is the canonical mapping. The MCP server uses it
@@ -135,6 +144,10 @@ func (o *Orchestrator) Delegate(ctx context.Context, req DelegateRequest) (*Task
 	// so cancel_task can interrupt.
 	bgCtx, cancel := context.WithCancel(context.Background())
 	o.runningCancels.Store(task.ID, cancel)
+	// Count this delegation against its provider until run() completes, so
+	// concurrent Delegate calls see it as load. Balanced by the decrement
+	// deferred in run().
+	o.incrInflight(provider)
 
 	go o.run(bgCtx, task, enrichedReq, skillHits)
 
@@ -196,11 +209,12 @@ func (o *Orchestrator) enrichPromptWithSkills(ctx context.Context, prompt string
 	return hits, block + prompt
 }
 
-// run is the goroutine body for a single delegation. ``surfacedSkills``
+// run is the goroutine body for a single delegation. “surfacedSkills“
 // captures the skill hits injected into the prompt; usage records are
 // fired-and-forgotten after the task completes.
 func (o *Orchestrator) run(ctx context.Context, task *Task, req DelegateRequest, surfacedSkills []skillsclient.Hit) {
 	defer o.runningCancels.Delete(task.ID)
+	defer o.decrInflight(task.Provider)
 
 	o.Store.Update(task.ID, func(t *Task) {
 		t.Status = StatusRunning
@@ -391,6 +405,52 @@ func (o *Orchestrator) Cancel(taskID string) bool {
 	return true
 }
 
+// incrInflight records one more outstanding delegation for provider.
+// Empty providers (an agent-hint with no provider mapping) are ignored so
+// the load map only ever holds real, budget-tracked providers.
+func (o *Orchestrator) incrInflight(p budget.Provider) {
+	if p == "" {
+		return
+	}
+	o.inflightMu.Lock()
+	if o.inflight == nil {
+		o.inflight = make(map[budget.Provider]int)
+	}
+	o.inflight[p]++
+	o.inflightMu.Unlock()
+}
+
+// decrInflight releases one outstanding delegation for provider, deleting
+// the key at zero so inflightSnapshot stays sparse.
+func (o *Orchestrator) decrInflight(p budget.Provider) {
+	if p == "" {
+		return
+	}
+	o.inflightMu.Lock()
+	if n := o.inflight[p]; n <= 1 {
+		delete(o.inflight, p)
+	} else {
+		o.inflight[p] = n - 1
+	}
+	o.inflightMu.Unlock()
+}
+
+// inflightSnapshot returns a copy of the current per-provider in-flight
+// counts for a RouteRequest, or nil when nothing is outstanding (which
+// preserves the router's pre-load behaviour).
+func (o *Orchestrator) inflightSnapshot() map[budget.Provider]int {
+	o.inflightMu.Lock()
+	defer o.inflightMu.Unlock()
+	if len(o.inflight) == 0 {
+		return nil
+	}
+	cp := make(map[budget.Provider]int, len(o.inflight))
+	for k, v := range o.inflight {
+		cp[k] = v
+	}
+	return cp
+}
+
 // chooseAgent returns (agent, provider). When AgentHint is set we honour
 // it directly and look up the associated provider via reverse mapping;
 // otherwise the budget router decides.
@@ -425,6 +485,10 @@ func (o *Orchestrator) chooseAgent(req DelegateRequest) (string, budget.Provider
 		TaskComplexity:  complexity,
 		EstimatedTokens: estimatedPromptTokens(req.Prompt),
 		Priority:        priority,
+		// Live in-flight counts so the router can spread concurrent work
+		// and honour per-provider MaxConcurrency caps. QueueDepth stays 0:
+		// Delegate dispatches immediately, so there is no routing backlog.
+		ProviderLoad: o.inflightSnapshot(),
 	})
 	if err != nil {
 		return "", "", fmt.Errorf("route: %w", err)
