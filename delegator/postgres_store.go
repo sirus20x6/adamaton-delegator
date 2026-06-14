@@ -12,8 +12,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/sirupsen/logrus"
 
-	"github.com/sirus20x6/adamaton-delegator/delegator/budget"
 	"github.com/sirus20x6/adamaton-core/pgutil"
+	"github.com/sirus20x6/adamaton-delegator/delegator/budget"
 )
 
 //go:embed migrations/*.sql
@@ -252,6 +252,50 @@ func (s *PgStore) evictIfFull(ctx context.Context) {
 		 )`, excess); err != nil {
 		s.logger.WithError(err).Warn("pg evict failed")
 	}
+}
+
+// orphanSweepReason is prefixed onto a reaped task's (empty) error column
+// so get_task_status and the dashboard make clear the task didn't fail on
+// its own merits — the delegator-mcp process died under it. The trailing
+// space is intentional: the old status ("pending"/"running") is appended
+// by the UPDATE (see SweepOrphans).
+const orphanSweepReason = "orphaned: delegator-mcp restarted while task was "
+
+// SweepOrphans is a one-shot crash-recovery step: it marks pending/running
+// tasks older than olderThan as failed. A delegator-mcp that dies
+// mid-delegation leaves its task row stuck in a non-terminal status
+// forever — evictIfFull deliberately never reaps pending/running — so
+// get_task_status and the dashboard keep showing a dead task as live.
+//
+// SAFETY: delegator-mcp processes share one delegator.tasks table (one per
+// Claude Code session), so a naive "mark every running row failed" would
+// clobber a *sibling* process's genuinely in-flight task. olderThan MUST
+// therefore exceed the maximum possible task wall-clock (the MCP caps tasks
+// at 30m via maxTimeoutSeconds); callers pass a value well beyond that
+// bound (default 1h) so only truly orphaned rows are reaped. The age gate
+// is on created_at, which is always set (started_at is NULL for pending).
+//
+// The reason string embeds the row's pre-update status via Postgres's
+// old-row SET semantics (all SET expressions see the values from before
+// the UPDATE), so the error reads e.g. "...while task was running". An
+// existing non-empty error is preserved. Returns the number of rows reaped.
+func (s *PgStore) SweepOrphans(ctx context.Context, olderThan time.Duration) (int64, error) {
+	if olderThan <= 0 {
+		return 0, nil
+	}
+	cutoff := time.Now().Add(-olderThan).UTC()
+	const sweep = `
+UPDATE delegator.tasks
+   SET error        = CASE WHEN error = '' THEN $1 || status ELSE error END,
+       status       = 'failed',
+       completed_at = now()
+ WHERE status IN ('pending','running')
+   AND created_at < $2`
+	tag, err := s.pool.Exec(ctx, sweep, orphanSweepReason, cutoff)
+	if err != nil {
+		return 0, fmt.Errorf("delegator.SweepOrphans: %w", err)
+	}
+	return tag.RowsAffected(), nil
 }
 
 // --- helpers ---

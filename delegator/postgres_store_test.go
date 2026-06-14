@@ -1,6 +1,7 @@
 package delegator
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"sync"
@@ -11,8 +12,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/sirus20x6/adamaton-delegator/delegator/budget"
 	"github.com/sirus20x6/adamaton-core/pgutil"
+	"github.com/sirus20x6/adamaton-delegator/delegator/budget"
 )
 
 func newTestPgStore(t *testing.T) *PgStore {
@@ -229,6 +230,56 @@ func TestPgStore_ConcurrentUpdatesSerialise(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, goroutines, got.ExitCode,
 		"FOR UPDATE row lock must serialise increments to avoid lost updates")
+}
+
+func TestPgStore_SweepOrphans(t *testing.T) {
+	s := newTestPgStore(t)
+	now := time.Now().UTC()
+	old := now.Add(-2 * time.Hour)
+
+	// Old non-terminal rows: orphaned by a crashed process → reaped.
+	s.Put(&Task{ID: "orphan-pending", Agent: "opencode", Prompt: "p", Status: StatusPending, CreatedAt: old})
+	s.Put(&Task{ID: "orphan-running", Agent: "opencode", Prompt: "p", Status: StatusRunning, CreatedAt: old})
+	// Fresh in-flight row (younger than the age gate) → must survive: this
+	// is the sibling-process safety property.
+	s.Put(&Task{ID: "fresh-running", Agent: "opencode", Prompt: "p", Status: StatusRunning, CreatedAt: now})
+	// Old but already terminal → must be left untouched.
+	s.Put(&Task{ID: "old-completed", Agent: "opencode", Prompt: "p", Status: StatusCompleted, CreatedAt: old})
+
+	n, err := s.SweepOrphans(context.Background(), time.Hour)
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), n, "only the two old non-terminal rows should be reaped")
+
+	op, ok := s.Get("orphan-pending")
+	require.True(t, ok)
+	assert.Equal(t, StatusFailed, op.Status)
+	assert.Contains(t, op.Error, "orphaned")
+	assert.Contains(t, op.Error, "pending", "reason should embed the pre-update status")
+	assert.False(t, op.CompletedAt.IsZero(), "reaped task should get a completed_at")
+
+	orun, ok := s.Get("orphan-running")
+	require.True(t, ok)
+	assert.Equal(t, StatusFailed, orun.Status)
+	assert.Contains(t, orun.Error, "running")
+
+	fresh, ok := s.Get("fresh-running")
+	require.True(t, ok)
+	assert.Equal(t, StatusRunning, fresh.Status, "fresh in-flight task must survive the sweep")
+
+	done, ok := s.Get("old-completed")
+	require.True(t, ok)
+	assert.Equal(t, StatusCompleted, done.Status, "already-terminal task must be untouched")
+	assert.Empty(t, done.Error)
+
+	// Idempotent: a second sweep reaps nothing.
+	n2, err := s.SweepOrphans(context.Background(), time.Hour)
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), n2)
+
+	// Disabled when olderThan <= 0.
+	n3, err := s.SweepOrphans(context.Background(), 0)
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), n3)
 }
 
 // Helpers ----
