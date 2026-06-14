@@ -170,6 +170,18 @@ func orphanSweepAge(logger *logrus.Logger) time.Duration {
 	return d
 }
 
+// resolveTasksDSN returns the DSN for the task store. DELEGATOR_TASKS_DSN
+// overrides cfgDSN (POSTGRES_DSN) when set, letting the task store +
+// live-stream producer + kanban sweeper live on a different database than
+// budget + contextmode (which need cfgDSN's pg_search). Empty/unset → the
+// task store shares cfgDSN, preserving the single-database default.
+func resolveTasksDSN(cfgDSN string) string {
+	if v := os.Getenv("DELEGATOR_TASKS_DSN"); v != "" {
+		return v
+	}
+	return cfgDSN
+}
+
 func main() {
 	if err := run(); err != nil {
 		fmt.Fprintf(os.Stderr, "delegator-mcp: %v\n", err)
@@ -259,12 +271,24 @@ func run() error {
 		logger.Info("SKILLS_API_URL is empty; skills RAG disabled")
 	}
 
-	// Replace the in-memory task store with postgres so cmd/api can read
-	// the same task list and surface it in the gogents UI. Both sides
-	// open their own pool against the same DSN; postgres MVCC handles
-	// the writer/reader concurrency the sqlite open-per-request dance
-	// used to avoid.
-	tasksStore, err := delegator.NewPgStore(cfg.DSN, 0, logger)
+	// Replace the in-memory task store with postgres so the dashboard can
+	// read the same task list and surface it in the UI. Both sides open
+	// their own pool against the same DSN; postgres MVCC handles the
+	// writer/reader concurrency the sqlite open-per-request dance avoided.
+	//
+	// The task store (and everything that rides its pool — the live-stream
+	// NOTIFY producer and the kanban sweeper) can be split onto a DIFFERENT
+	// database than budget/contextmode via DELEGATOR_TASKS_DSN. This lets a
+	// workstation delegator-mcp — where the agent CLIs + local vLLM live, so
+	// execution must stay here — write tasks and publish live output to the
+	// dashboard's Postgres (which the dashboard reads + LISTENs on), while
+	// budget + contextmode keep using cfg.DSN (the workstation's ParadeDB,
+	// whose pg_search contextmode needs and the dashboard's pgvector lacks).
+	tasksDSN := resolveTasksDSN(cfg.DSN)
+	if tasksDSN != cfg.DSN {
+		logger.Info("task store on a separate DSN (DELEGATOR_TASKS_DSN); budget + contextmode stay on POSTGRES_DSN")
+	}
+	tasksStore, err := delegator.NewPgStore(tasksDSN, 0, logger)
 	if err != nil {
 		return fmt.Errorf("open tasks store: %w", err)
 	}
