@@ -21,12 +21,12 @@ import (
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/worker"
 
-	"github.com/sirus20x6/adamaton-platform/temporal/activities"
-	"github.com/sirus20x6/adamaton-delegator/delegator/budget"
-	"github.com/sirus20x6/adamaton-delegator/delegator"
-	"github.com/sirus20x6/adamaton-delegator/delegator/skillsclient"
 	"github.com/sirus20x6/adamaton-core/executor/cli"
+	"github.com/sirus20x6/adamaton-delegator/delegator"
+	"github.com/sirus20x6/adamaton-delegator/delegator/budget"
 	"github.com/sirus20x6/adamaton-delegator/delegator/quota"
+	"github.com/sirus20x6/adamaton-delegator/delegator/skillsclient"
+	"github.com/sirus20x6/adamaton-platform/temporal/activities"
 	"github.com/sirus20x6/adamaton-platform/temporal/workflows"
 )
 
@@ -136,6 +136,40 @@ func clampTimeoutCapOnly(secs int) int {
 	return secs
 }
 
+// defaultOrphanSweepAge is how old a stuck pending/running task must be
+// before startup recovery reaps it. It must comfortably exceed the
+// per-task wall-clock cap (maxTimeoutSeconds = 30m) so a sibling
+// delegator-mcp's genuinely in-flight task is never mistaken for an
+// orphan. One hour gives a 2x margin.
+const defaultOrphanSweepAge = time.Hour
+
+// orphanSweepAge resolves the startup orphan-sweep age threshold from
+// DELEGATOR_ORPHAN_SWEEP_AGE (a Go duration, e.g. "90m"). "0"/"off"/
+// "disable" turns the sweep off; an unparseable value falls back to the
+// default with a warning. Values below maxTimeoutSeconds are rejected up
+// to the safe floor so a misconfiguration can't reap live tasks.
+func orphanSweepAge(logger *logrus.Logger) time.Duration {
+	raw := os.Getenv("DELEGATOR_ORPHAN_SWEEP_AGE")
+	switch raw {
+	case "":
+		return defaultOrphanSweepAge
+	case "0", "off", "disable", "disabled":
+		return 0
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		logger.WithError(err).WithField("value", raw).
+			Warn("invalid DELEGATOR_ORPHAN_SWEEP_AGE; using default")
+		return defaultOrphanSweepAge
+	}
+	if floor := time.Duration(maxTimeoutSeconds) * time.Second; d < floor {
+		logger.WithFields(logrus.Fields{"value": raw, "floor": floor.String()}).
+			Warn("DELEGATOR_ORPHAN_SWEEP_AGE below per-task timeout cap; raising to floor")
+		return floor
+	}
+	return d
+}
+
 func main() {
 	if err := run(); err != nil {
 		fmt.Fprintf(os.Stderr, "delegator-mcp: %v\n", err)
@@ -236,6 +270,24 @@ func run() error {
 	}
 	defer tasksStore.Close()
 	orch.Store = tasksStore
+
+	// One-shot orphan recovery. A previous delegator-mcp that crashed
+	// mid-delegation leaves task rows stuck in pending/running forever
+	// (evictIfFull never reaps non-terminal rows), so get_task_status and
+	// the dashboard keep showing a dead task as live. Reap rows older than
+	// the max possible task lifetime (well beyond maxTimeoutSeconds=30m) so
+	// a sibling delegator-mcp's genuinely in-flight task is never clobbered.
+	// Set DELEGATOR_ORPHAN_SWEEP_AGE=0 (or off) to disable.
+	if age := orphanSweepAge(logger); age > 0 {
+		octx, ocancel := context.WithTimeout(context.Background(), 30*time.Second)
+		if n, err := tasksStore.SweepOrphans(octx, age); err != nil {
+			logger.WithError(err).Warn("orphan task sweep failed")
+		} else if n > 0 {
+			logger.WithFields(logrus.Fields{"count": n, "older_than": age.String()}).
+				Info("recovered orphaned tasks (marked failed)")
+		}
+		ocancel()
+	}
 
 	// Kanban stale-claim sweep. Reuses the tasks-store pool (same evo-schema
 	// DSN) to periodically flip crashed-worker card claims back to unclaimed
@@ -460,7 +512,7 @@ type listSchedulesArgs struct{}
 
 func registerTools(server *mcp.Server, orch *delegator.Orchestrator, gate *temporalGate, dsn string, logger *logrus.Logger) {
 	mcp.AddTool(server, &mcp.Tool{
-		Name: "delegate_task",
+		Name:        "delegate_task",
 		Description: "Hand a coding task off to another AI agent. Returns immediately with a task_id; poll with get_task_status. Before calling, estimate difficulty (trivial/easy/medium/hard/expert) and priority (immediate/normal/background) — the budget router uses both to pick the cheapest available agent that can handle the work.",
 	}, func(_ context.Context, _ *mcp.CallToolRequest, args delegateArgs) (*mcp.CallToolResult, any, error) {
 		if len(args.Prompt) > maxPromptBytes {
