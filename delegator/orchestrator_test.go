@@ -388,3 +388,53 @@ func TestOrchestrator_PassesProviderLoadToRouter(t *testing.T) {
 		t.Fatalf("expected openai back to the seeded 1 after completion, got %d", got)
 	}
 }
+
+func TestOrchestrator_HonorsExplicitTaskID(t *testing.T) {
+	fb := &fakeBudget{routeResp: &budget.RouteResponse{Provider: budget.ProviderOpenAI, Model: "gpt-4o"}}
+	o := newTestOrchestrator(t, fb, fakeCLI(t, "fake", "ok"))
+
+	task, err := o.Delegate(context.Background(), DelegateRequest{
+		Prompt:     "x",
+		Difficulty: DifficultyEasy,
+		TaskID:     "task-pinned-123",
+	})
+	if err != nil {
+		t.Fatalf("Delegate: %v", err)
+	}
+	if task.ID != "task-pinned-123" {
+		t.Fatalf("expected pinned id, got %q", task.ID)
+	}
+	// Retrievable by the pinned id (the durable path returns it to the caller).
+	waitForStatus(t, o.Store, "task-pinned-123", StatusCompleted, 3*time.Second)
+}
+
+func TestOrchestrator_GeneratesTaskIDWhenUnset(t *testing.T) {
+	fb := &fakeBudget{routeResp: &budget.RouteResponse{Provider: budget.ProviderOpenAI}}
+	o := newTestOrchestrator(t, fb, fakeCLI(t, "fake", "ok"))
+	task, err := o.Delegate(context.Background(), DelegateRequest{Prompt: "x"})
+	if err != nil {
+		t.Fatalf("Delegate: %v", err)
+	}
+	if task.ID == "" || task.ID == "task-pinned-123" {
+		t.Fatalf("expected a freshly generated id, got %q", task.ID)
+	}
+}
+
+func TestOrchestrator_ChooseAgent(t *testing.T) {
+	fb := &fakeBudget{routeResp: &budget.RouteResponse{Provider: budget.ProviderOpenAI}}
+	o := newTestOrchestrator(t, fb, fakeCLI(t, "fake", "x"))
+	agent, provider, err := o.ChooseAgent(DelegateRequest{Prompt: "x", Difficulty: DifficultyMedium})
+	if err != nil {
+		t.Fatalf("ChooseAgent: %v", err)
+	}
+	if agent != "fake" || provider != budget.ProviderOpenAI {
+		t.Fatalf("got agent=%q provider=%q", agent, provider)
+	}
+}
+
+func TestNewTaskID(t *testing.T) {
+	a, b := NewTaskID(), NewTaskID()
+	if a == "" || a == b {
+		t.Fatalf("ids must be non-empty and unique, got %q and %q", a, b)
+	}
+}
