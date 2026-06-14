@@ -526,6 +526,43 @@ func (c *CCSaver) GetGeminiUsage(days int) *GeminiCCSaverTotals {
 	return totals
 }
 
+// SumTokensInWindow returns the total input/output tokens recorded for the
+// given api_types between start and end (inclusive). Used by the delegator
+// to attribute a delegation's REAL token cost: the proxy captured every
+// internal call the agent made in that window — the multi-turn loop a
+// prompt+stdout estimate can't see. Returns (0,0,nil) for a nil receiver or
+// empty api_types so callers can fall back to an estimate.
+//
+// Like GetTokenTotalsByAPIType, this compares the bare timestamp column to
+// Go-formatted RFC3339 bounds (matching the proxy's stored format) and pins
+// idx_timestamp so the range scan stays fast on the multi-GB live DB.
+func (c *CCSaver) SumTokensInWindow(apiTypes []string, start, end time.Time) (int64, int64, error) {
+	if c == nil || c.db == nil || len(apiTypes) == 0 {
+		return 0, 0, nil
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	placeholders := make([]string, len(apiTypes))
+	args := make([]any, 0, len(apiTypes)+2)
+	args = append(args, start.Format(time.RFC3339), end.Format(time.RFC3339))
+	for i, at := range apiTypes {
+		placeholders[i] = "?"
+		args = append(args, at)
+	}
+	query := fmt.Sprintf(
+		`SELECT COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0)
+		 FROM interactions INDEXED BY idx_timestamp
+		 WHERE timestamp >= ? AND timestamp <= ? AND api_type IN (%s)`,
+		strings.Join(placeholders, ","),
+	)
+	var in, out int64
+	if err := c.db.QueryRow(query, args...).Scan(&in, &out); err != nil {
+		return 0, 0, fmt.Errorf("sum tokens in window: %w", err)
+	}
+	return in, out, nil
+}
+
 // GetTokenTotalsByAPIType rolls up input/output tokens, call counts, and
 // models per api_type over the last `days` window. This is the single source
 // of agent token usage for GetAllAgentUsage — the per-agent CLI session-file
