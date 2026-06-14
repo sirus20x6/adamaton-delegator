@@ -3,8 +3,8 @@ package delegator
 import (
 	"context"
 
-	"github.com/sirus20x6/adamaton-platform/temporal/activities"
 	"github.com/sirus20x6/adamaton-delegator/delegator/budget"
+	"github.com/sirus20x6/adamaton-platform/temporal/activities"
 )
 
 // ActivityAdapter wraps an Orchestrator so it satisfies the
@@ -35,6 +35,7 @@ func (a *ActivityAdapter) DelegateSync(ctx context.Context, in activities.Delega
 		AgentHint:   in.AgentHint,
 		WorkingDir:  in.WorkingDir,
 		Model:       in.Model,
+		TaskID:      in.TaskID,
 		TimeoutSecs: in.TimeoutSecs,
 	}
 	t, err := a.o.DelegateSync(ctx, req)

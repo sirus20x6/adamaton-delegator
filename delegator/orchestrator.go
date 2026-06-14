@@ -131,8 +131,12 @@ func (o *Orchestrator) Delegate(ctx context.Context, req DelegateRequest) (*Task
 		enrichedReq.Prompt = augmented
 	}
 
+	id := req.TaskID
+	if id == "" {
+		id = newTaskID()
+	}
 	task := &Task{
-		ID:         newTaskID(),
+		ID:         id,
 		Agent:      agent,
 		Provider:   provider,
 		Difficulty: req.Difficulty,
@@ -466,6 +470,14 @@ func (o *Orchestrator) inflightSnapshot() map[budget.Provider]int {
 	return cp
 }
 
+// ChooseAgent exposes routing for the durable delegate_task path, which
+// resolves the agent/provider up front (so the response and the pinned
+// AgentHint passed into the Temporal workflow are consistent) before
+// starting the workflow. Equivalent to what Delegate does internally.
+func (o *Orchestrator) ChooseAgent(req DelegateRequest) (string, budget.Provider, error) {
+	return o.chooseAgent(req)
+}
+
 // chooseAgent returns (agent, provider). When AgentHint is set we honour
 // it directly and look up the associated provider via reverse mapping;
 // otherwise the budget router decides.
@@ -529,6 +541,11 @@ func estimatedPromptTokens(prompt string) int {
 	}
 	return t
 }
+
+// NewTaskID exposes task-id generation so the durable delegate_task path
+// can mint an id to use as both the Temporal WorkflowID and the store row
+// PK before starting the workflow.
+func NewTaskID() string { return newTaskID() }
 
 // newTaskID returns a 16-byte hex ID. crypto/rand is overkill for an
 // in-memory dev tool but the cost is one syscall.
