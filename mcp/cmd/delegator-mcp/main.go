@@ -260,6 +260,20 @@ func run() error {
 
 	orch := delegator.New(bc, cliExec, logger)
 
+	// Real token accounting: read each delegation's actual token usage from
+	// the CCSAVER capture DB (the proxy logged every internal call the agent
+	// made) so budget reporting reflects real spend instead of the coarse
+	// prompt+stdout estimate. Read-only + best-effort: if CCSAVER isn't
+	// present (CCSAVER_DB / ~/.local/share/ccsaver/data.db), report() falls
+	// back to the estimate. Held for the process lifetime.
+	if cc, err := quota.OpenCCSaver(quota.CCSaverConfig{Logger: logger}); err != nil {
+		logger.WithError(err).Info("CCSAVER unavailable; budget uses the coarse token estimate")
+	} else {
+		defer cc.Close()
+		orch.Tokens = cc
+		logger.Info("budget token accounting sourced from CCSAVER real tokens")
+	}
+
 	// Skills RAG: when the dashboard is reachable, every delegate_task
 	// asks /api/v1/skills/search for top-K relevant skills and prepends
 	// them as context. Set SKILLS_API_URL="" (literal empty string) to

@@ -438,3 +438,60 @@ func TestNewTaskID(t *testing.T) {
 		t.Fatalf("ids must be non-empty and unique, got %q and %q", a, b)
 	}
 }
+
+type fakeTokens struct{ in, out int64 }
+
+func (f fakeTokens) SumTokensInWindow(_ []string, _, _ time.Time) (int64, int64, error) {
+	return f.in, f.out, nil
+}
+
+func TestOrchestrator_ReportUsesRealTokens(t *testing.T) {
+	fb := &fakeBudget{routeResp: &budget.RouteResponse{Provider: budget.ProviderOpenAI, Model: "gpt-4o"}}
+	o := newTestOrchestrator(t, fb, fakeCLI(t, "fake", "hello"))
+	o.Tokens = fakeTokens{in: 1200, out: 800}
+
+	task, err := o.Delegate(context.Background(), DelegateRequest{Prompt: "x", Difficulty: DifficultyMedium})
+	if err != nil {
+		t.Fatalf("Delegate: %v", err)
+	}
+	waitForStatus(t, o.Store, task.ID, StatusCompleted, 3*time.Second)
+	time.Sleep(30 * time.Millisecond) // let report() run
+
+	fb.mu.Lock()
+	defer fb.mu.Unlock()
+	if len(fb.reportCalls) == 0 {
+		t.Fatal("expected a budget report")
+	}
+	r := fb.reportCalls[0]
+	if r.TotalTokens != 2000 || r.PromptTokens != 1200 || r.CompletionTokens != 800 {
+		t.Fatalf("expected real 1200/800/2000, got %d/%d/%d",
+			r.PromptTokens, r.CompletionTokens, r.TotalTokens)
+	}
+}
+
+func TestOrchestrator_ReportFallsBackToEstimate(t *testing.T) {
+	fb := &fakeBudget{routeResp: &budget.RouteResponse{Provider: budget.ProviderOpenAI}}
+	o := newTestOrchestrator(t, fb, fakeCLI(t, "fake", "hello world"))
+	// o.Tokens left nil → estimate path.
+
+	task, err := o.Delegate(context.Background(), DelegateRequest{Prompt: "some prompt", Difficulty: DifficultyMedium})
+	if err != nil {
+		t.Fatalf("Delegate: %v", err)
+	}
+	waitForStatus(t, o.Store, task.ID, StatusCompleted, 3*time.Second)
+	time.Sleep(30 * time.Millisecond)
+
+	fb.mu.Lock()
+	defer fb.mu.Unlock()
+	if len(fb.reportCalls) == 0 {
+		t.Fatal("expected a budget report")
+	}
+	r := fb.reportCalls[0]
+	if r.TotalTokens <= 0 {
+		t.Fatalf("expected a positive estimate, got %d", r.TotalTokens)
+	}
+	if r.PromptTokens != 0 || r.CompletionTokens != 0 {
+		t.Fatalf("estimate path should leave prompt/completion 0, got %d/%d",
+			r.PromptTokens, r.CompletionTokens)
+	}
+}
