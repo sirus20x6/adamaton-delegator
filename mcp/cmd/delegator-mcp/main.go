@@ -289,6 +289,15 @@ func run() error {
 		ocancel()
 	}
 
+	// Live task streaming: publish each delegation's stdout/stderr over
+	// Postgres LISTEN/NOTIFY (reusing the tasks pool) so a UI can tail a
+	// running delegation instead of polling for the finished blob. Cheap
+	// when nobody is listening; set DELEGATOR_TASK_STREAM=off to disable.
+	if os.Getenv("DELEGATOR_TASK_STREAM") != "off" {
+		orch.Events = delegator.NewPgTaskEvents(tasksStore.Pool(), logger)
+		logger.Info("live task streaming enabled (pg NOTIFY delegator_task_*)")
+	}
+
 	// Kanban stale-claim sweep. Reuses the tasks-store pool (same evo-schema
 	// DSN) to periodically flip crashed-worker card claims back to unclaimed
 	// — the crash-recovery mechanism for the kanban orchestration model

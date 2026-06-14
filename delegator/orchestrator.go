@@ -61,6 +61,12 @@ type Orchestrator struct {
 	// is effectively a token-budget knob.
 	SkillsTopK int
 
+	// Events, when non-nil, receives the running CLI's stdout/stderr
+	// chunks so a UI can tail a delegation live (PgTaskEvents publishes
+	// them over Postgres LISTEN/NOTIFY). Nil disables streaming; the
+	// delegation behaves exactly as before.
+	Events TaskEvents
+
 	// runningCancels lets cancel_task interrupt an in-flight delegation.
 	runningCancels sync.Map // taskID → context.CancelFunc
 
@@ -221,12 +227,21 @@ func (o *Orchestrator) run(ctx context.Context, task *Task, req DelegateRequest,
 		t.StartedAt = time.Now().UTC()
 	})
 
-	out, err := o.CLI.RunAgent(ctx, task.Agent, cli.CLIInput{
+	in := cli.CLIInput{
 		Prompt:     req.Prompt,
 		WorkingDir: req.WorkingDir,
 		Model:      req.Model,
 		Timeout:    req.TimeoutSecs,
-	})
+	}
+	// Tail the subprocess live when a publisher is wired. The chunks are
+	// also still captured into the stored Output by the executor, so this
+	// only adds the live feed — it doesn't replace the final record.
+	if o.Events != nil {
+		id := task.ID
+		in.OnStdout = func(b []byte) { o.Events.Publish(id, "stdout", b) }
+		in.OnStderr = func(b []byte) { o.Events.Publish(id, "stderr", b) }
+	}
+	out, err := o.CLI.RunAgent(ctx, task.Agent, in)
 	endedAt := time.Now().UTC()
 
 	o.Store.Update(task.ID, func(t *Task) {
