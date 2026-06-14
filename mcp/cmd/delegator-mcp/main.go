@@ -447,6 +447,28 @@ func (g *temporalGate) close() {
 	g.sched = nil
 }
 
+// ensureClient brings the gate up (dial + worker + registration, same as
+// ensureUp) and returns the Temporal client so delegate_task can start a
+// DelegationWorkflow on the shared queue. The registered worker means this
+// process can also execute the workflow it just started.
+func (g *temporalGate) ensureClient() (client.Client, error) {
+	if _, err := g.ensureUp(); err != nil {
+		return nil, err
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.client, nil
+}
+
+// clientIfUp returns the Temporal client only if the gate is already up,
+// without dialing. Used by cancel_task to reach a durable workflow without
+// forcing a connection when Temporal was never wired this session.
+func (g *temporalGate) clientIfUp() client.Client {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.client
+}
+
 // localBudget adapts budget.Router + budget.Tracker into the orchestrator's
 // BudgetClient interface. Routing reads through Router; reporting writes
 // through Tracker. No HTTP hop — this is a single-binary MCP server.
@@ -546,15 +568,64 @@ func registerTools(server *mcp.Server, orch *delegator.Orchestrator, gate *tempo
 			return errResult(fmt.Sprintf("invalid priority %q", args.Priority)), nil, nil
 		}
 
+		// Resolve routing up front: mints the task id, lets the response
+		// report the chosen agent, and pins AgentHint so the workflow
+		// activity (possibly on another worker) and the in-process fallback
+		// agree on the same agent instead of re-routing.
+		req.TaskID = delegator.NewTaskID()
+		agent, provider, rerr := orch.ChooseAgent(req)
+		if rerr != nil {
+			return errResult(rerr.Error()), nil, nil
+		}
+		req.AgentHint = agent
+
+		// Durable path: run the delegation as a Temporal workflow keyed by
+		// the task id, so an MCP/worker restart re-dispatches it instead of
+		// silently orphaning the task. Falls back to the in-process path when
+		// Temporal is unreachable, so delegate_task still works offline.
+		if c, gerr := gate.ensureClient(); gerr == nil {
+			orch.Store.Put(&delegator.Task{
+				ID: req.TaskID, Agent: agent, Provider: provider,
+				Difficulty: req.Difficulty, Priority: req.Priority,
+				Prompt: req.Prompt, WorkingDir: req.WorkingDir, Model: req.Model,
+				Status: delegator.StatusPending, CreatedAt: time.Now().UTC(),
+			})
+			_, werr := c.ExecuteWorkflow(context.Background(),
+				client.StartWorkflowOptions{ID: req.TaskID, TaskQueue: delegationTaskQueue},
+				workflows.DelegationWorkflow,
+				activities.DelegationInput{
+					TaskID: req.TaskID, Prompt: req.Prompt,
+					Difficulty: string(req.Difficulty), Priority: string(req.Priority),
+					AgentHint: agent, WorkingDir: req.WorkingDir, Model: req.Model,
+					TimeoutSecs: req.TimeoutSecs,
+				})
+			if werr == nil {
+				return jsonResult(map[string]any{
+					"task_id":   req.TaskID,
+					"agent":     agent,
+					"provider":  provider,
+					"status":    string(delegator.StatusPending),
+					"execution": "durable",
+				}), nil, nil
+			}
+			logger.WithError(werr).Warn("durable delegate: ExecuteWorkflow failed; running in-process")
+		} else {
+			logger.WithError(gerr).Debug("temporal unavailable; running delegate_task in-process")
+		}
+
+		// In-process fallback (Temporal down or ExecuteWorkflow failed). req
+		// already carries the minted TaskID + pinned AgentHint, so the id and
+		// agent match what a durable run would have used.
 		task, err := orch.Delegate(context.Background(), req)
 		if err != nil {
 			return errResult(err.Error()), nil, nil
 		}
 		return jsonResult(map[string]any{
-			"task_id":  task.ID,
-			"agent":    task.Agent,
-			"provider": task.Provider,
-			"status":   string(task.Status),
+			"task_id":   task.ID,
+			"agent":     task.Agent,
+			"provider":  task.Provider,
+			"status":    string(task.Status),
+			"execution": "in_process",
 		}), nil, nil
 	})
 
@@ -612,9 +683,23 @@ func registerTools(server *mcp.Server, orch *delegator.Orchestrator, gate *tempo
 		Name:        "cancel_task",
 		Description: "Cancel a running task. Sends SIGTERM-then-SIGKILL to the underlying CLI.",
 	}, func(_ context.Context, _ *mcp.CallToolRequest, args taskIDArg) (*mcp.CallToolResult, any, error) {
-		ok := orch.Cancel(args.TaskID)
+		cancelled := false
+		// Durable cancel: if the task ran as a Temporal workflow (its id is
+		// the WorkflowID), cancel the workflow so the activity context
+		// unwinds and the subprocess gets SIGTERM'd in whichever worker owns
+		// it — surviving an MCP restart. No-op when it isn't a workflow.
+		if c := gate.clientIfUp(); c != nil {
+			if err := c.CancelWorkflow(context.Background(), args.TaskID, ""); err == nil {
+				cancelled = true
+			}
+		}
+		// In-process cancel for the offline-fallback path (and a fast local
+		// SIGTERM when the task is running in this very process).
+		if orch.Cancel(args.TaskID) {
+			cancelled = true
+		}
 		status := "cancelled"
-		if !ok {
+		if !cancelled {
 			status = "not_found_or_not_running"
 		}
 		return jsonResult(map[string]any{

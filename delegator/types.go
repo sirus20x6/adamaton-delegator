@@ -67,13 +67,18 @@ func (d Difficulty) ToComplexity() budget.TaskComplexity {
 // DelegateRequest is the orchestrator's input. The MCP layer decodes the
 // delegate_task tool call into this shape.
 type DelegateRequest struct {
-	Prompt      string
-	Difficulty  Difficulty
-	Priority    budget.Priority
-	AgentHint   string // optional: skip routing, use this agent directly
-	WorkingDir  string
-	Model       string // optional: override model selection
-	TimeoutSecs int    // 0 → orchestrator default
+	Prompt     string
+	Difficulty Difficulty
+	Priority   budget.Priority
+	AgentHint  string // optional: skip routing, use this agent directly
+	WorkingDir string
+	Model      string // optional: override model selection
+	// TaskID, when non-empty, pins the created task's id instead of
+	// generating a fresh one. The durable delegate_task path sets it so the
+	// returned task_id equals the Temporal WorkflowID and the persisted
+	// row, keeping get_task_status/cancel stable across the workflow hop.
+	TaskID      string
+	TimeoutSecs int // 0 → orchestrator default
 }
 
 // Task is the record kept in the in-memory store.
