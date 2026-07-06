@@ -17,17 +17,14 @@ jobs:
       # Siblings required by the relative `replace ../../<repo>` lines in
       # delegator/go.mod and mcp/go.mod. Only core and platform/temporal are
       # actually in the module graph; the other replace targets are never
-      # resolved so they don't need checkouts.
-      - uses: actions/checkout@v4
-        with:
-          repository: sirus20x6/adamaton-core
-          token: ${{ secrets.GITHUB_TOKEN }}
-          path: core
-      - uses: actions/checkout@v4
-        with:
-          repository: sirus20x6/adamaton-platform
-          token: ${{ secrets.GITHUB_TOKEN }}
-          path: platform
+      # resolved so they don't need checkouts. GITHUB_TOKEN is repo-scoped
+      # and cannot read the private sibling repos, so clone with the
+      # self-hosted runner user's own SSH credentials instead.
+      - name: checkout siblings (private repos)
+        run: |
+          rm -rf core platform
+          git clone --depth 1 git@github.com:sirus20x6/adamaton-core.git core
+          git clone --depth 1 git@github.com:sirus20x6/adamaton-platform.git platform
       - name: vet, build, and test all modules
         env:
           GOGENTS_SKIP_DOCKER_TESTS: "1"
