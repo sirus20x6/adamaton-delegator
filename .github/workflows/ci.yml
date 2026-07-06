@@ -1,0 +1,41 @@
+name: ci
+on:
+  pull_request:
+  push:
+    branches: [main]
+concurrency:
+  group: ci-delegator-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  test:
+    # Self-hosted only: hosted runners are billing-blocked for this account.
+    runs-on: [self-hosted, linux]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: delegator
+      # Siblings required by the relative `replace ../../<repo>` lines in
+      # delegator/go.mod and mcp/go.mod. Only core and platform/temporal are
+      # actually in the module graph; the other replace targets are never
+      # resolved so they don't need checkouts.
+      - uses: actions/checkout@v4
+        with:
+          repository: sirus20x6/adamaton-core
+          token: ${{ secrets.GITHUB_TOKEN }}
+          path: core
+      - uses: actions/checkout@v4
+        with:
+          repository: sirus20x6/adamaton-platform
+          token: ${{ secrets.GITHUB_TOKEN }}
+          path: platform
+      - name: vet, build, and test all modules
+        env:
+          GOGENTS_SKIP_DOCKER_TESTS: "1"
+          GOFLAGS: -mod=mod
+        run: |
+          cd delegator
+          find . -name go.mod -not -path '*/vendor/*' | while read -r m; do
+            d=$(dirname "$m")
+            echo "== $d"
+            (cd "$d" && GOWORK=off go vet ./... && GOWORK=off go build ./... && GOWORK=off go test ./...) || exit 1
+          done
