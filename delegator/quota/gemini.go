@@ -20,13 +20,20 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-// Gemini OAuth constants — borrowed from gemini-cli-core's oauth2.js. They
-// are public client identifiers; baking them in matches the TS source.
 const (
-	geminiClientID     = "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com"
-	geminiClientSecret = "***REMOVED-OAUTH-SECRET***"
-	geminiQuotaURL     = "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota"
-	geminiTokenURL     = "https://oauth2.googleapis.com/token"
+	geminiQuotaURL = "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota"
+	geminiTokenURL = "https://oauth2.googleapis.com/token"
+)
+
+// Gemini OAuth client identifiers. These are the public installed-app
+// credentials from gemini-cli-core's oauth2.js (not confidential secrets),
+// but they are supplied via environment rather than baked into the repo so no
+// credential-shaped string is committed. Set GEMINI_OAUTH_CLIENT_ID and
+// GEMINI_OAUTH_CLIENT_SECRET (copy them from gemini-cli-core) to enable the
+// Gemini quota lookup; when unset, the quota call is skipped.
+var (
+	geminiClientID     = os.Getenv("GEMINI_OAUTH_CLIENT_ID")
+	geminiClientSecret = os.Getenv("GEMINI_OAUTH_CLIENT_SECRET")
 )
 
 // GeminiConfig overrides paths and HTTP transport for tests.
