@@ -188,6 +188,14 @@ func sleepWithContext(ctx context.Context, d time.Duration) error {
 	}
 }
 
+func kanbanGetBoardPath(boardID string, includeArchived bool) string {
+	path := fmt.Sprintf("/kanban/boards/%s", url.PathEscape(boardID))
+	if includeArchived {
+		path += "?include_archived=true"
+	}
+	return path
+}
+
 // --- tool argument types ---
 
 type kanbanCreateBoardArgs struct {
@@ -209,11 +217,12 @@ type kanbanAddCardArgs struct {
 }
 
 type kanbanListReadyArgs struct {
-	BoardID string `json:"board_id" jsonschema:"the board ID whose ready (unclaimed) cards to list"`
+	BoardID string `json:"board_id" jsonschema:"the board ID whose ready, unclaimed, dependency-unblocked cards to list"`
 }
 
 type kanbanGetBoardArgs struct {
-	BoardID string `json:"board_id" jsonschema:"the board ID to fetch in full (all columns + every card)"`
+	BoardID         string `json:"board_id" jsonschema:"the board ID to fetch in full"`
+	IncludeArchived bool   `json:"include_archived,omitempty" jsonschema:"include archived cards, comments, and dependency links when true"`
 }
 
 type kanbanClaimCardArgs struct {
@@ -241,6 +250,38 @@ type kanbanReleaseCardArgs struct {
 	ClaimToken string `json:"claim_token" jsonschema:"the claim token from kanban_claim_card; must match"`
 }
 
+type kanbanReopenCardArgs struct {
+	CardID string `json:"card_id" jsonschema:"the completed or failed card ID to reopen into Ready"`
+}
+
+type kanbanArchiveCardArgs struct {
+	CardID string `json:"card_id" jsonschema:"the completed card ID to archive"`
+}
+
+type kanbanRestoreCardArgs struct {
+	CardID string `json:"card_id" jsonschema:"the archived card ID to restore"`
+}
+
+type kanbanArchiveDoneArgs struct {
+	BoardID       string `json:"board_id" jsonschema:"the board ID whose completed cards should be archived"`
+	OlderThanDays *int   `json:"older_than_days,omitempty" jsonschema:"optional threshold; only archive Done cards older than this many days; omit to archive all Done cards"`
+}
+
+type kanbanReleaseStaleArgs struct {
+	BoardID          string `json:"board_id" jsonschema:"the board ID whose stale claims should be released"`
+	OlderThanMinutes *int   `json:"older_than_minutes,omitempty" jsonschema:"optional threshold in minutes; defaults to 30"`
+}
+
+type kanbanAddDependencyArgs struct {
+	CardID          string `json:"card_id" jsonschema:"the card ID that is blocked"`
+	DependsOnCardID string `json:"depends_on_card_id" jsonschema:"the same-board card ID that must complete first"`
+}
+
+type kanbanDeleteDependencyArgs struct {
+	CardID          string `json:"card_id" jsonschema:"the card ID that is currently blocked"`
+	DependsOnCardID string `json:"depends_on_card_id" jsonschema:"the dependency card ID to remove"`
+}
+
 type kanbanUpdateCardArgs struct {
 	CardID     string `json:"card_id" jsonschema:"the card ID to update"`
 	Title      string `json:"title,omitempty" jsonschema:"new card title"`
@@ -251,11 +292,11 @@ type kanbanUpdateCardArgs struct {
 }
 
 type kanbanDeleteCardArgs struct {
-	CardID string `json:"card_id" jsonschema:"the card ID to delete (removes its comments too)"`
+	CardID string `json:"card_id" jsonschema:"the card ID to delete (removes its comments and dependency links too)"`
 }
 
 type kanbanDeleteBoardArgs struct {
-	BoardID string `json:"board_id" jsonschema:"the board ID to delete (cascades columns, cards, comments)"`
+	BoardID string `json:"board_id" jsonschema:"the board ID to delete (cascades columns, cards, comments, dependency links)"`
 }
 
 type kanbanAddCommentArgs struct {
@@ -305,7 +346,7 @@ func registerKanbanTools(server *mcp.Server, logger *logrus.Logger) {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "kanban_add_card",
-		Description: "Add a card to a kanban board. Defaults to the Backlog column, priority 'normal', difficulty 'medium'. Returns the created Card.",
+		Description: "Add a card to a kanban board. Defaults to Backlog, priority 'normal', difficulty 'medium'. Use priority low|normal|high|urgent and difficulty trivial|easy|medium|hard|expert. For coding work, make the body self-contained with acceptance criteria and the requirement to work in a fresh worktree, commit, open a PR, merge that PR into main/master, verify trunk contains the result, then complete the card. Returns the created Card.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args kanbanAddCardArgs) (*mcp.CallToolResult, any, error) {
 		if args.BoardID == "" {
 			return errResult("board_id is required"), nil, nil
@@ -336,7 +377,7 @@ func registerKanbanTools(server *mcp.Server, logger *logrus.Logger) {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "kanban_list_ready_cards",
-		Description: "List unclaimed cards in the board's Ready column — the queue of work agents can claim. Returns Card[].",
+		Description: "List unclaimed, unarchived, dependency-unblocked cards in the board's Ready column. This is the claim queue agents should pull from; blocked cards stay hidden here until their dependencies are completed. Returns Card[].",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args kanbanListReadyArgs) (*mcp.CallToolResult, any, error) {
 		if args.BoardID == "" {
 			return errResult("board_id is required"), nil, nil
@@ -351,13 +392,13 @@ func registerKanbanTools(server *mcp.Server, logger *logrus.Logger) {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "kanban_get_board",
-		Description: "Fetch a board in full: the board plus ALL its columns and every card in each (Backlog, Ready, In Progress, Review, Done). Use this to see cards that kanban_list_ready_cards omits (it returns only the unclaimed Ready queue) — e.g. to dedup before adding cards or to review Backlog/In-Progress/Done. Returns {board, columns:[{...,cards:[...]}]}.",
+		Description: "Fetch a board in full: board metadata, columns, flat cards, comments, and dependency links. Archived cards are hidden by default; pass include_archived=true to inspect archived Done work. Use this to dedup before adding cards, inspect blocked cards, review active work, and audit dependencies. Returns {board, columns, cards, comments, links}.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args kanbanGetBoardArgs) (*mcp.CallToolResult, any, error) {
 		if args.BoardID == "" {
 			return errResult("board_id is required"), nil, nil
 		}
 		raw, err := client.do(ctx, http.MethodGet,
-			fmt.Sprintf("/kanban/boards/%s", url.PathEscape(args.BoardID)), nil)
+			kanbanGetBoardPath(args.BoardID, args.IncludeArchived), nil)
 		if err != nil {
 			return errResult(err.Error()), nil, nil
 		}
@@ -366,7 +407,7 @@ func registerKanbanTools(server *mcp.Server, logger *logrus.Logger) {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "kanban_claim_card",
-		Description: "Atomically claim a ready card for an agent. Returns {card, claim_token} or an error if the card is already claimed (409). The claim_token is required for later move/complete/release.",
+		Description: "Atomically claim a ready card for an agent. Returns {card, claim_token}. A 409 means the card is already claimed, archived, or blocked by incomplete dependencies. The claim_token is required for later move/complete/release.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args kanbanClaimCardArgs) (*mcp.CallToolResult, any, error) {
 		if args.CardID == "" {
 			return errResult("card_id is required"), nil, nil
@@ -410,7 +451,7 @@ func registerKanbanTools(server *mcp.Server, logger *logrus.Logger) {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "kanban_complete_card",
-		Description: "Mark a claimed card done and move it to the Done column. claim_token must match. Optionally records result_summary, result_task_id, result_pr_url. Returns the updated Card.",
+		Description: "Mark a claimed card done and move it to the Done column. For coding work, call this ONLY after the agent has worked in a worktree, committed the intended changes, opened a PR, merged that PR into main/master (not another branch), and verified main/master contains the result. claim_token must match. Record result_summary, result_task_id when applicable, and result_pr_url. Returns the updated Card.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args kanbanCompleteCardArgs) (*mcp.CallToolResult, any, error) {
 		if args.CardID == "" {
 			return errResult("card_id is required"), nil, nil
@@ -438,7 +479,7 @@ func registerKanbanTools(server *mcp.Server, logger *logrus.Logger) {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "kanban_release_card",
-		Description: "Release a claimed card back to unclaimed (clears claimed_by/claim_token/claimed_at). claim_token must match. Returns the updated Card.",
+		Description: "Release a claimed card back to unclaimed (clears claimed_by/claim_token/claimed_at). Use this for failed, blocked, or abandoned attempts only after adding a comment explaining the failure. Do not release a successfully completed coding card as a substitute for commit/PR/merge to main/master. claim_token must match. Returns the updated Card.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args kanbanReleaseCardArgs) (*mcp.CallToolResult, any, error) {
 		if args.CardID == "" {
 			return errResult("card_id is required"), nil, nil
@@ -449,6 +490,127 @@ func registerKanbanTools(server *mcp.Server, logger *logrus.Logger) {
 		raw, err := client.do(ctx, http.MethodPost,
 			fmt.Sprintf("/kanban/cards/%s/release", url.PathEscape(args.CardID)),
 			map[string]any{"claim_token": args.ClaimToken})
+		if err != nil {
+			return errResult(err.Error()), nil, nil
+		}
+		return jsonResult(raw), nil, nil
+	})
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "kanban_reopen_card",
+		Description: "Reopen a completed or failed, unarchived card into the Ready column. Use when accepted work needs another pass or a failed card should re-enter the dependency-aware ready queue. Returns the updated Card.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args kanbanReopenCardArgs) (*mcp.CallToolResult, any, error) {
+		if args.CardID == "" {
+			return errResult("card_id is required"), nil, nil
+		}
+		raw, err := client.do(ctx, http.MethodPost,
+			fmt.Sprintf("/kanban/cards/%s/reopen", url.PathEscape(args.CardID)), nil)
+		if err != nil {
+			return errResult(err.Error()), nil, nil
+		}
+		return jsonResult(raw), nil, nil
+	})
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "kanban_archive_card",
+		Description: "Soft-archive a completed card so busy boards hide old Done work without deleting history. Only completed, unarchived cards can be archived. Returns the updated Card.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args kanbanArchiveCardArgs) (*mcp.CallToolResult, any, error) {
+		if args.CardID == "" {
+			return errResult("card_id is required"), nil, nil
+		}
+		raw, err := client.do(ctx, http.MethodPost,
+			fmt.Sprintf("/kanban/cards/%s/archive", url.PathEscape(args.CardID)), nil)
+		if err != nil {
+			return errResult(err.Error()), nil, nil
+		}
+		return jsonResult(raw), nil, nil
+	})
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "kanban_restore_card",
+		Description: "Restore an archived card to the visible board while preserving its status, result metadata, comments, and dependency links. Returns the updated Card.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args kanbanRestoreCardArgs) (*mcp.CallToolResult, any, error) {
+		if args.CardID == "" {
+			return errResult("card_id is required"), nil, nil
+		}
+		raw, err := client.do(ctx, http.MethodPost,
+			fmt.Sprintf("/kanban/cards/%s/restore", url.PathEscape(args.CardID)), nil)
+		if err != nil {
+			return errResult(err.Error()), nil, nil
+		}
+		return jsonResult(raw), nil, nil
+	})
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "kanban_archive_done_cards",
+		Description: "Bulk soft-archive completed Done cards on a board. older_than_days is optional; omit it to archive all Done cards, or pass 0+ to keep newer completions visible. Returns {archived, board_id}.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args kanbanArchiveDoneArgs) (*mcp.CallToolResult, any, error) {
+		if args.BoardID == "" {
+			return errResult("board_id is required"), nil, nil
+		}
+		body := map[string]any{}
+		if args.OlderThanDays != nil {
+			body["older_than_days"] = *args.OlderThanDays
+		}
+		raw, err := client.do(ctx, http.MethodPost,
+			fmt.Sprintf("/kanban/boards/%s/archive-done", url.PathEscape(args.BoardID)), body)
+		if err != nil {
+			return errResult(err.Error()), nil, nil
+		}
+		return jsonResult(raw), nil, nil
+	})
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "kanban_release_stale_cards",
+		Description: "Operator bulk action to clear claims older than older_than_minutes, default 30, so abandoned agent work returns to the queue. Use with care; a currently running agent may still be editing in its worktree. Returns {released, board_id}.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args kanbanReleaseStaleArgs) (*mcp.CallToolResult, any, error) {
+		if args.BoardID == "" {
+			return errResult("board_id is required"), nil, nil
+		}
+		body := map[string]any{}
+		if args.OlderThanMinutes != nil {
+			body["older_than_minutes"] = *args.OlderThanMinutes
+		}
+		raw, err := client.do(ctx, http.MethodPost,
+			fmt.Sprintf("/kanban/boards/%s/release-stale", url.PathEscape(args.BoardID)), body)
+		if err != nil {
+			return errResult(err.Error()), nil, nil
+		}
+		return jsonResult(raw), nil, nil
+	})
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "kanban_add_dependency",
+		Description: "Make card_id depend on depends_on_card_id. Both cards must be on the same board. A dependent card will not appear in kanban_list_ready_cards and cannot be claimed until all dependency cards are completed. Returns the dependency link {source_card_id, target_card_id, link_type, created_at}.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args kanbanAddDependencyArgs) (*mcp.CallToolResult, any, error) {
+		if args.CardID == "" {
+			return errResult("card_id is required"), nil, nil
+		}
+		if args.DependsOnCardID == "" {
+			return errResult("depends_on_card_id is required"), nil, nil
+		}
+		raw, err := client.do(ctx, http.MethodPost,
+			fmt.Sprintf("/kanban/cards/%s/dependencies", url.PathEscape(args.CardID)),
+			map[string]any{"depends_on_card_id": args.DependsOnCardID})
+		if err != nil {
+			return errResult(err.Error()), nil, nil
+		}
+		return jsonResult(raw), nil, nil
+	})
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "kanban_delete_dependency",
+		Description: "Remove a dependency edge so card_id no longer depends on depends_on_card_id. Use when the ordering constraint was wrong or the dependency is no longer required. Returns {deleted, card_id, depends_on_card_id}.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args kanbanDeleteDependencyArgs) (*mcp.CallToolResult, any, error) {
+		if args.CardID == "" {
+			return errResult("card_id is required"), nil, nil
+		}
+		if args.DependsOnCardID == "" {
+			return errResult("depends_on_card_id is required"), nil, nil
+		}
+		raw, err := client.do(ctx, http.MethodDelete,
+			fmt.Sprintf("/kanban/cards/%s/dependencies/%s",
+				url.PathEscape(args.CardID), url.PathEscape(args.DependsOnCardID)), nil)
 		if err != nil {
 			return errResult(err.Error()), nil, nil
 		}
