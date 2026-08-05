@@ -395,3 +395,65 @@ func TestKanbanClient_DeleteNotRetriedOn5xx(t *testing.T) {
 		t.Fatalf("DELETE should not be retried, saw %d calls", calls)
 	}
 }
+
+func TestKanbanGetBoardPath(t *testing.T) {
+	if got := kanbanGetBoardPath("board/one", false); got != "/kanban/boards/board%2Fone" {
+		t.Fatalf("default path = %q", got)
+	}
+	if got := kanbanGetBoardPath("board one", true); got != "/kanban/boards/board%20one?include_archived=true" {
+		t.Fatalf("include archived path = %q", got)
+	}
+}
+
+func TestKanbanClient_ArchiveDoneBody(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("unexpected method %q", r.Method)
+		}
+		if r.URL.Path != "/api/v1/kanban/boards/b1/archive-done" {
+			t.Errorf("unexpected path %q", r.URL.Path)
+		}
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode body: %v", err)
+		}
+		if body["older_than_days"] != float64(7) {
+			t.Errorf("older_than_days not threaded: %+v", body)
+		}
+		_, _ = w.Write([]byte(`{"archived":3,"board_id":"b1"}`))
+	}))
+	defer srv.Close()
+
+	c := newTestKanbanClient(srv.URL)
+	raw, err := c.do(context.Background(), http.MethodPost, "/kanban/boards/b1/archive-done",
+		map[string]any{"older_than_days": 7})
+	if err != nil {
+		t.Fatalf("do: %v", err)
+	}
+	if !strings.Contains(string(raw), `"archived":3`) {
+		t.Fatalf("unexpected body: %s", raw)
+	}
+}
+
+func TestKanbanClient_DeleteDependencyPath(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete {
+			t.Errorf("unexpected method %q", r.Method)
+		}
+		if r.URL.Path != "/api/v1/kanban/cards/card-1/dependencies/card-2" {
+			t.Errorf("unexpected path %q", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"deleted":true,"card_id":"card-1","depends_on_card_id":"card-2"}`))
+	}))
+	defer srv.Close()
+
+	c := newTestKanbanClient(srv.URL)
+	raw, err := c.do(context.Background(), http.MethodDelete,
+		"/kanban/cards/card-1/dependencies/card-2", nil)
+	if err != nil {
+		t.Fatalf("do: %v", err)
+	}
+	if !strings.Contains(string(raw), `"deleted":true`) {
+		t.Fatalf("unexpected body: %s", raw)
+	}
+}

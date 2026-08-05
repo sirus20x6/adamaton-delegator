@@ -261,7 +261,11 @@ List all kanban boards for a project. Returns `Board[]`.
 ### `kanban_add_card`
 
 Add a card to a kanban board. Defaults to Backlog column, priority
-`normal`, difficulty `medium`. Returns the created Card.
+`normal`, difficulty `medium`. Use priority `low|normal|high|urgent` and
+difficulty `trivial|easy|medium|hard|expert`. For coding cards, write a
+self-contained body with acceptance criteria and the explicit requirement to
+work in a fresh worktree, commit, open a PR, merge into `main`/`master`, verify
+trunk, then complete the card. Returns the created Card.
 
 | Arg | Required | Description |
 |---|---|---|
@@ -269,15 +273,29 @@ Add a card to a kanban board. Defaults to Backlog column, priority
 | `title` | yes | Card title. |
 | `body` | no | Card description. |
 | `column_id` | no | Target column. Defaults to Backlog. |
-| `priority` | no | Default `normal`. |
-| `difficulty` | no | Default `medium`. |
+| `priority` | no | `low`, `normal`, `high`, or `urgent`. Default `normal`. |
+| `difficulty` | no | `trivial`, `easy`, `medium`, `hard`, or `expert`. Default `medium`. |
+
+---
+
+### `kanban_get_board`
+
+Fetch a board in full. Returns `{board, columns, cards, comments, links}`.
+Archived cards are hidden by default; pass `include_archived=true` to inspect
+archived Done work and its comments/dependency links.
+
+| Arg | Required | Description |
+|---|---|---|
+| `board_id` | yes | Board to fetch. |
+| `include_archived` | no | Include archived cards/comments/links when true. |
 
 ---
 
 ### `kanban_list_ready_cards`
 
-List unclaimed cards in the board's Ready column — the queue agents can
-claim. Returns `Card[]`.
+List unclaimed, unarchived, dependency-unblocked cards in the board's Ready
+column. This is the queue agents should pull from. Cards blocked by incomplete
+dependencies are hidden here and also fail claim with 409. Returns `Card[]`.
 
 | Arg | Required | Description |
 |---|---|---|
@@ -287,9 +305,10 @@ claim. Returns `Card[]`.
 
 ### `kanban_claim_card`
 
-Atomically claim a ready card for an agent. Returns `{card, claim_token}`
-or a 409 error if already claimed. The `claim_token` is required for later
-move/complete/release calls.
+Atomically claim a ready card for an agent. Returns `{card, claim_token}` or a
+409 error if the card is already claimed, archived, or blocked by incomplete
+dependencies. The `claim_token` is required for later move/complete/release
+calls.
 
 | Arg | Required | Description |
 |---|---|---|
@@ -314,8 +333,11 @@ match. Returns the updated Card.
 
 ### `kanban_complete_card`
 
-Mark a claimed card done and move it to the Done column. `claim_token`
-must match. Returns the updated Card.
+Mark a claimed card done and move it to the Done column. For coding work, call
+this only after the agent worked in a worktree, committed the intended changes,
+opened a PR targeting `main`/`master`, merged that PR into `main`/`master` (not
+another branch), and verified trunk contains the result. `claim_token` must
+match. Returns the updated Card.
 
 | Arg | Required | Description |
 |---|---|---|
@@ -329,9 +351,11 @@ must match. Returns the updated Card.
 
 ### `kanban_release_card`
 
-Release a claimed card back to unclaimed (clears `claimed_by`,
-`claim_token`, `claimed_at`). `claim_token` must match. Returns the
-updated Card.
+Release a claimed card back to unclaimed (clears `claimed_by`, `claim_token`,
+`claimed_at`). Use this for failed, blocked, or abandoned attempts only after
+adding a comment explaining the failure and any worktree/branch state. Do not
+release a successfully completed coding card as a substitute for commit/PR/merge
+to trunk. `claim_token` must match. Returns the updated Card.
 
 | Arg | Required | Description |
 |---|---|---|
@@ -349,6 +373,91 @@ Add a comment to a card. Returns the created Comment.
 | `card_id` | yes | Card to comment on. |
 | `author` | yes | Comment author identifier. |
 | `text` | yes | Comment body. |
+
+---
+
+### `kanban_add_dependency`
+
+Make `card_id` depend on `depends_on_card_id`. Both cards must be on the same
+board. A dependent card does not appear in `kanban_list_ready_cards` and cannot
+be claimed until every dependency card is completed. Returns the dependency link.
+
+| Arg | Required | Description |
+|---|---|---|
+| `card_id` | yes | Blocked card. |
+| `depends_on_card_id` | yes | Prerequisite card that must complete first. |
+
+---
+
+### `kanban_delete_dependency`
+
+Remove a dependency edge so `card_id` no longer depends on
+`depends_on_card_id`. Returns `{deleted, card_id, depends_on_card_id}`.
+
+| Arg | Required | Description |
+|---|---|---|
+| `card_id` | yes | Blocked card. |
+| `depends_on_card_id` | yes | Dependency card to remove. |
+
+---
+
+### `kanban_reopen_card`
+
+Reopen a completed or failed, unarchived card into Ready. Returns the updated
+Card.
+
+| Arg | Required | Description |
+|---|---|---|
+| `card_id` | yes | Completed or failed card to reopen. |
+
+---
+
+### `kanban_archive_card`
+
+Soft-archive a completed card so busy boards hide old Done work without
+deleting history. Returns the updated Card.
+
+| Arg | Required | Description |
+|---|---|---|
+| `card_id` | yes | Completed card to archive. |
+
+---
+
+### `kanban_restore_card`
+
+Restore an archived card to the visible board while preserving status, result
+metadata, comments, and dependency links. Returns the updated Card.
+
+| Arg | Required | Description |
+|---|---|---|
+| `card_id` | yes | Archived card to restore. |
+
+---
+
+### `kanban_archive_done_cards`
+
+Bulk soft-archive completed Done cards on a board. Omit `older_than_days` to
+archive all Done cards, or pass `0+` to keep newer completions visible. Returns
+`{archived, board_id}`.
+
+| Arg | Required | Description |
+|---|---|---|
+| `board_id` | yes | Board whose Done cards should be archived. |
+| `older_than_days` | no | Only archive Done cards older than this many days. |
+
+---
+
+### `kanban_release_stale_cards`
+
+Operator bulk action to clear claims older than `older_than_minutes` so
+abandoned agent work returns to the queue. Defaults to 30 minutes. Use with care:
+a running agent may still be editing in its worktree. Returns `{released,
+board_id}`.
+
+| Arg | Required | Description |
+|---|---|---|
+| `board_id` | yes | Board whose stale claims should be released. |
+| `older_than_minutes` | no | Claim age threshold in minutes. Default 30. |
 
 ---
 
