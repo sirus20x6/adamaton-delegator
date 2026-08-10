@@ -217,7 +217,8 @@ type kanbanAddCardArgs struct {
 }
 
 type kanbanListReadyArgs struct {
-	BoardID string `json:"board_id" jsonschema:"the board ID whose ready, unclaimed, dependency-unblocked cards to list"`
+	BoardID        string `json:"board_id" jsonschema:"the board ID whose ready, unclaimed, dependency-unblocked cards to list"`
+	IncludeBacklog bool   `json:"include_backlog,omitempty" jsonschema:"also return unclaimed cards outside the Ready column (Backlog included). Set this when the Ready queue comes back empty: an empty queue means nothing has been PROMOTED, not that the board has no work."`
 }
 
 type kanbanGetBoardArgs struct {
@@ -377,13 +378,16 @@ func registerKanbanTools(server *mcp.Server, logger *logrus.Logger) {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "kanban_list_ready_cards",
-		Description: "List unclaimed, unarchived, dependency-unblocked cards in the board's Ready column. This is the claim queue agents should pull from; blocked cards stay hidden here until their dependencies are completed. Returns Card[].",
+		Description: "List unclaimed, unarchived, dependency-unblocked cards in the board's Ready column. This is the claim queue agents should pull from; blocked cards stay hidden here until their dependencies are completed. IMPORTANT: an empty result means nothing has been PROMOTED to Ready — it does NOT mean the board has no work, and a board whose cards all sit in Backlog will return [] forever. Before concluding a board is empty or blocked, call again with include_backlog=true, which also returns unclaimed cards from every other column (Ready still sorts first). Returns Card[].",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args kanbanListReadyArgs) (*mcp.CallToolResult, any, error) {
 		if args.BoardID == "" {
 			return errResult("board_id is required"), nil, nil
 		}
-		raw, err := client.do(ctx, http.MethodGet,
-			fmt.Sprintf("/kanban/boards/%s/ready", url.PathEscape(args.BoardID)), nil)
+		path := fmt.Sprintf("/kanban/boards/%s/ready", url.PathEscape(args.BoardID))
+		if args.IncludeBacklog {
+			path += "?include_backlog=true"
+		}
+		raw, err := client.do(ctx, http.MethodGet, path, nil)
 		if err != nil {
 			return errResult(err.Error()), nil, nil
 		}
